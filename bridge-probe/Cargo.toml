@@ -1,0 +1,42 @@
+[package]
+name        = "bridge-probe"
+version     = "2.0.0"
+edition     = "2021"
+description = "TorShield-IR pluggable-transport handshake prober — Iran-optimised"
+authors     = ["TorShield-IR Contributors"]
+
+[[bin]]
+name = "bridge-probe"
+path = "src/main.rs"
+
+[dependencies]
+tokio              = { version = "1",              features = ["full", "process"] }
+serde              = { version = "1",              features = ["derive"] }
+serde_json         = "1"
+#
+# ─── CRITICAL FIX ───────────────────────────────────────────────────────────
+# clap 4.6+ depends on clap_lex 1.1.0, which requires Cargo feature
+# `edition2024` — not stabilised until Rust 1.85 (Cargo ≥1.85).
+# GitHub Actions runner Cargo 1.78 fails with:
+#   "feature `edition2024` is required"
+#
+# Fix A (Cargo.toml): pin clap to the 4.5.x series which uses clap_lex 0.7.x.
+# Fix B (workflow):   upgrade toolchain from '1.78' to 'stable'.
+# Both fixes applied simultaneously for belt-and-suspenders safety.
+# ────────────────────────────────────────────────────────────────────────────
+clap               = { version = ">=4.5.0, <4.6", features = ["derive"] }
+# Hard pin clap_lex as well — prevents indirect resolution to 1.1.0
+# even if another transitive dependency requests it.
+clap_lex           = ">=0.7.0, <1.0"
+#
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+anyhow             = "1"
+regex              = "1"
+
+[profile.release]
+opt-level     = 3
+strip         = true
+lto           = true
+codegen-units = 1
+panic         = "abort"
