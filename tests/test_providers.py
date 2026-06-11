@@ -1,0 +1,451 @@
+"""
+tests/test_providers.py — Comprehensive provider tests with mocked HTTP responses
+
+Tests each provider with various HTTP response codes and scenarios:
+  - Cerebras with 200, 400, 404, 403, 401 responses
+  - CF Workers AI with various responses
+  - CF AI Gateway with URL validation
+  - Portkey with auth validation
+  - Circuit breaker opening/closing
+  - Model fallback chain
+
+All tests use unittest.mock to avoid making real API calls.
+"""
+
+import json
+import os
+import sys
+import time
+import unittest
+from unittest.mock import MagicMock, Mock, patch
+
+# Ensure project root is on sys.path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+class TestProviderCircuitBreaker(unittest.TestCase):
+    """Test the ProviderCircuitBreaker class."""
+
+    def _get_cb_class(self):
+        from torshield_ai_gateway.providers import ProviderCircuitBreaker
+        return ProviderCircuitBreaker
+
+    def test_initial_state_is_closed(self):
+        CB = self._get_cb_class()
+        cb = CB("test_provider")
+        self.assertEqual(cb.state, "closed")
+        self.assertEqual(cb.failure_count, 0)
+        self.assertTrue(cb.allow_request())
+
+    def test_record_success_resets_state(self):
+        CB = self._get_cb_class()
+        cb = CB("test_provider", failure_threshold=3)
+        cb.record_failure()
+        cb.record_failure()
+        cb.record_success()
+        self.assertEqual(cb.state, "closed")
+        self.assertEqual(cb.failure_count, 0)
+
+    def test_opens_after_threshold_failures(self):
+        CB = self._get_cb_class()
+        cb = CB("test_provider", failure_threshold=3)
+        cb.record_failure()
+        cb.record_failure()
+        self.assertEqual(cb.state, "closed")
+        cb.record_failure()
+        self.assertEqual(cb.state, "open")
+        self.assertFalse(cb.allow_request())
+
+    def test_open_circuit_rejects_requests(self):
+        CB = self._get_cb_class()
+        cb = CB("test_provider", failure_threshold=2)
+        cb.record_failure()
+        cb.record_failure()
+        self.assertEqual(cb.state, "open")
+        self.assertFalse(cb.allow_request())
+
+    def test_half_open_after_recovery_timeout(self):
+        CB = self._get_cb_class()
+        cb = CB("test_provider", failure_threshold=2, recovery_timeout=0.01)
+        cb.record_failure()
+        cb.record_failure()
+        self.assertEqual(cb.state, "open")
+
+        # Wait for recovery timeout
+        time.sleep(0.02)
+
+        self.assertTrue(cb.allow_request())
+        self.assertEqual(cb.state, "half_open")
+
+    def test_half_open_allows_request(self):
+        CB = self._get_cb_class()
+        cb = CB("test_provider", failure_threshold=2, recovery_timeout=0.01)
+        cb.record_failure()
+        cb.record_failure()
+        time.sleep(0.02)
+        # Should transition to half_open and allow the request
+        self.assertTrue(cb.allow_request())
+
+    def test_success_in_half_open_closes_circuit(self):
+        CB = self._get_cb_class()
+        cb = CB("test_provider", failure_threshold=2, recovery_timeout=0.01)
+        cb.record_failure()
+        cb.record_failure()
+        time.sleep(0.02)
+        cb.allow_request()  # triggers half_open
+        cb.record_success()
+        self.assertEqual(cb.state, "closed")
+
+    def test_failure_in_half_open_reopens_circuit(self):
+        CB = self._get_cb_class()
+        cb = CB("test_provider", failure_threshold=2, recovery_timeout=0.01)
+        cb.record_failure()
+        cb.record_failure()
+        time.sleep(0.02)
+        cb.allow_request()  # triggers half_open
+        cb.record_failure()
+        self.assertEqual(cb.state, "open")
+
+    def test_custom_failure_threshold(self):
+        CB = self._get_cb_class()
+        cb = CB("test_provider", failure_threshold=10)
+        for _ in range(9):
+            cb.record_failure()
+        self.assertEqual(cb.state, "closed")
+        cb.record_failure()
+        self.assertEqual(cb.state, "open")
+
+    def test_last_failure_time_updated(self):
+        CB = self._get_cb_class()
+        cb = CB("test_provider")
+        before = time.time()
+        cb.record_failure()
+        after = time.time()
+        self.assertGreaterEqual(cb.last_failure_time, before)
+        self.assertLessEqual(cb.last_failure_time, after)
+
+
+class TestCerebrasProvider(unittest.TestCase):
+    """Test CerebrasProvider with mocked HTTP responses."""
+
+    # CerebrasProvider uses build_rotator_from_env("CEREBRAS") which
+    # reads CEREBRAS_API_KEY_{i} environment variables.
+    CEREBRAS_ENV = {
+        "CEREBRAS_API_KEY_1": "test-cerebras-key-12345678",
+    }
+
+    @patch.dict(os.environ, CEREBRAS_ENV)
+    @patch("urllib.request.urlopen")
+    def test_cerebras_200_success(self, mock_urlopen):
+        """Test Cerebras with a successful 200 response."""
+        mock_resp = MagicMock()
+        mock_resp.getcode.return_value = 200
+        mock_resp.read.return_value = json.dumps({
+            "choices": [{"message": {"content": "TORSHIELD_OK test response"}}]
+        }).encode("utf-8")
+        mock_resp.__enter__ = Mock(return_value=mock_resp)
+        mock_resp.__exit__ = Mock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        from torshield_ai_gateway.providers import CerebrasProvider
+        provider = CerebrasProvider()
+
+        result = provider.chat_complete(
+            messages=[{"role": "user", "content": "Hello"}],
+        )
+        self.assertIsNotNone(result)
+        self.assertIn("TORSHIELD_OK", result)
+
+    @patch.dict(os.environ, CEREBRAS_ENV)
+    def test_cerebras_400_error(self):
+        """Test Cerebras with a 400 error response."""
+        import urllib.error
+        from torshield_ai_gateway.providers import CerebrasProvider, _BaseProvider
+
+        with patch.object(_BaseProvider, '_post_json_with_retry') as mock_post:
+            mock_post.side_effect = urllib.error.HTTPError(
+                url="https://api.cerebras.ai/v1/chat/completions",
+                code=400,
+                msg="Bad Request",
+                hdrs={},
+                fp=None,
+            )
+            provider = CerebrasProvider()
+            with self.assertRaises(urllib.error.HTTPError):
+                provider.chat_complete(
+                    messages=[{"role": "user", "content": "Hello"}],
+                )
+
+    @patch.dict(os.environ, CEREBRAS_ENV)
+    def test_cerebras_401_unauthorized(self):
+        """Test Cerebras with a 401 unauthorized error."""
+        import urllib.error
+        from torshield_ai_gateway.providers import CerebrasProvider, _BaseProvider
+
+        with patch.object(_BaseProvider, '_post_json_with_retry') as mock_post:
+            mock_post.side_effect = urllib.error.HTTPError(
+                url="https://api.cerebras.ai/v1/chat/completions",
+                code=401,
+                msg="Unauthorized",
+                hdrs={},
+                fp=None,
+            )
+            provider = CerebrasProvider()
+            with self.assertRaises(urllib.error.HTTPError):
+                provider.chat_complete(
+                    messages=[{"role": "user", "content": "Hello"}],
+                )
+
+    @patch.dict(os.environ, CEREBRAS_ENV)
+    def test_cerebras_403_forbidden(self):
+        """Test Cerebras with a 403 forbidden error."""
+        import urllib.error
+        from torshield_ai_gateway.providers import CerebrasProvider, _BaseProvider
+
+        with patch.object(_BaseProvider, '_post_json_with_retry') as mock_post:
+            mock_post.side_effect = urllib.error.HTTPError(
+                url="https://api.cerebras.ai/v1/chat/completions",
+                code=403,
+                msg="Forbidden",
+                hdrs={},
+                fp=None,
+            )
+            provider = CerebrasProvider()
+            with self.assertRaises(urllib.error.HTTPError):
+                provider.chat_complete(
+                    messages=[{"role": "user", "content": "Hello"}],
+                )
+
+    @patch.dict(os.environ, CEREBRAS_ENV)
+    def test_cerebras_404_model_not_found(self):
+        """Test Cerebras with a 404 model not found error."""
+        import urllib.error
+        from torshield_ai_gateway.providers import CerebrasProvider, _BaseProvider
+
+        with patch.object(_BaseProvider, '_post_json_with_retry') as mock_post:
+            mock_post.side_effect = urllib.error.HTTPError(
+                url="https://api.cerebras.ai/v1/chat/completions",
+                code=404,
+                msg="Not Found",
+                hdrs={},
+                fp=None,
+            )
+            provider = CerebrasProvider()
+            with self.assertRaises(urllib.error.HTTPError):
+                provider.chat_complete(
+                    messages=[{"role": "user", "content": "Hello"}],
+                )
+
+    def test_cerebras_no_api_key(self):
+        """Test Cerebras initialization without API key raises ValueError."""
+        with patch.dict(os.environ, {}, clear=True):
+            os.environ.pop("CEREBRAS_API_KEY_1", None)
+            from torshield_ai_gateway.providers import CerebrasProvider
+            # AccountRotator raises ValueError when no slots configured
+            with self.assertRaises(ValueError):
+                CerebrasProvider()
+
+
+class TestCFWorkersAIProvider(unittest.TestCase):
+    """Test Cloudflare Workers AI provider with mocked responses."""
+
+    CF_ENV = {
+        "CF_ACCOUNT_ID_1": "test-account-123",
+        "CF_API_TOKEN_1": "test-cf-token-12345678",
+    }
+
+    @patch.dict(os.environ, CF_ENV)
+    def test_cf_workers_429_rate_limited(self):
+        """Test CF Workers AI with rate limiting (429)."""
+        import urllib.error
+        from torshield_ai_gateway.providers import CloudflareWorkersAIProvider, _BaseProvider
+
+        with patch.object(_BaseProvider, '_post_json_with_retry') as mock_post:
+            mock_post.side_effect = urllib.error.HTTPError(
+                url="https://api.cloudflare.com/client/v4/accounts/test/models/run",
+                code=429,
+                msg="Too Many Requests",
+                hdrs={},
+                fp=None,
+            )
+            provider = CloudflareWorkersAIProvider()
+            with self.assertRaises(urllib.error.HTTPError):
+                provider.chat_complete(
+                    messages=[{"role": "user", "content": "Hello"}],
+                )
+
+    @patch.dict(os.environ, CF_ENV)
+    def test_cf_workers_500_server_error(self):
+        """Test CF Workers AI with server error (500)."""
+        import urllib.error
+        from torshield_ai_gateway.providers import CloudflareWorkersAIProvider, _BaseProvider
+
+        with patch.object(_BaseProvider, '_post_json_with_retry') as mock_post:
+            mock_post.side_effect = urllib.error.HTTPError(
+                url="https://api.cloudflare.com/client/v4/accounts/test/models/run",
+                code=500,
+                msg="Internal Server Error",
+                hdrs={},
+                fp=None,
+            )
+            provider = CloudflareWorkersAIProvider()
+            with self.assertRaises(urllib.error.HTTPError):
+                provider.chat_complete(
+                    messages=[{"role": "user", "content": "Hello"}],
+                )
+
+    def test_cf_workers_no_config_raises(self):
+        """Test CF Workers AI without config raises ValueError."""
+        with patch.dict(os.environ, {}, clear=True):
+            from torshield_ai_gateway.providers import CloudflareWorkersAIProvider
+            with self.assertRaises(ValueError):
+                CloudflareWorkersAIProvider()
+
+
+class TestCFAIGatewayProvider(unittest.TestCase):
+    """Test Cloudflare AI Gateway provider with URL validation."""
+
+    def test_url_validation_valid(self):
+        """Test that valid HTTPS URLs pass validation."""
+        from torshield_ai_gateway.providers import _validate_url
+        url = _validate_url("https://gateway.ai.cloudflare.com/v1/abc123/my-gateway", "test")
+        self.assertTrue(url.startswith("https://"))
+
+    def test_url_validation_invalid_no_https(self):
+        """Test that non-HTTPS URLs are rejected."""
+        from torshield_ai_gateway.providers import _validate_url
+        with self.assertRaises(ValueError):
+            _validate_url("http://gateway.ai.cloudflare.com/v1/abc123/gw", "test")
+
+    def test_url_validation_strips_trailing_slash(self):
+        """Test that trailing slashes are stripped."""
+        from torshield_ai_gateway.providers import _validate_url
+        url = _validate_url("https://gateway.ai.cloudflare.com/v1/abc123/gw/", "test")
+        self.assertFalse(url.endswith("/"))
+
+
+class TestPortkeyProvider(unittest.TestCase):
+    """Test Portkey provider with auth validation."""
+
+    PORTKEY_ENV = {
+        "PORTKEY_API_KEY_1": "pk-test-portkey-key-12345678",
+    }
+
+    @patch.dict(os.environ, PORTKEY_ENV)
+    def test_portkey_key_validation_valid(self):
+        """Test Portkey key validation with valid pk- prefix."""
+        from torshield_ai_gateway.providers import PortkeyProvider
+        provider = PortkeyProvider()
+        issues = provider._validate_portkey_key("pk-abc-xyz-12345678", slot_index=1)
+        self.assertIsInstance(issues, list)
+
+    @patch.dict(os.environ, PORTKEY_ENV)
+    def test_portkey_key_validation_empty(self):
+        """Test Portkey key validation with empty key."""
+        from torshield_ai_gateway.providers import PortkeyProvider
+        provider = PortkeyProvider()
+        issues = provider._validate_portkey_key("", slot_index=1)
+        self.assertIsInstance(issues, list)
+        self.assertGreater(len(issues), 0)
+
+    @patch.dict(os.environ, PORTKEY_ENV)
+    def test_portkey_key_validation_no_prefix(self):
+        """Test Portkey key validation without pk- prefix."""
+        from torshield_ai_gateway.providers import PortkeyProvider
+        provider = PortkeyProvider()
+        issues = provider._validate_portkey_key("sk-invalid-key", slot_index=1)
+        self.assertIsInstance(issues, list)
+        self.assertGreater(len(issues), 0)  # Should warn about missing pk- prefix
+
+    @patch.dict(os.environ, PORTKEY_ENV)
+    def test_portkey_key_validation_newline(self):
+        """Test Portkey key validation detects newlines."""
+        from torshield_ai_gateway.providers import PortkeyProvider
+        provider = PortkeyProvider()
+        issues = provider._validate_portkey_key("pk-abc\nxyz", slot_index=1)
+        self.assertIsInstance(issues, list)
+        # Should detect newline
+        has_newline_issue = any("newline" in issue.lower() for issue in issues)
+        self.assertTrue(has_newline_issue)
+
+    def test_portkey_no_api_key(self):
+        """Test Portkey initialization without API key raises ValueError."""
+        with patch.dict(os.environ, {}, clear=True):
+            os.environ.pop("PORTKEY_API_KEY_1", None)
+            from torshield_ai_gateway.providers import PortkeyProvider
+            # AccountRotator raises ValueError when no slots configured
+            with self.assertRaises(ValueError):
+                PortkeyProvider()
+
+
+class TestModelFallbackChain(unittest.TestCase):
+    """Test model fallback chain across providers."""
+
+    def test_stable_models_list_exists(self):
+        """Test that CF_STABLE_MODELS fallback list is populated."""
+        from torshield_ai_gateway.providers import CF_STABLE_MODELS
+        self.assertIsInstance(CF_STABLE_MODELS, list)
+        self.assertGreater(len(CF_STABLE_MODELS), 0)
+        for model in CF_STABLE_MODELS:
+            self.assertTrue(model.startswith("@cf/"))
+
+    def test_mask_key(self):
+        """Test API key masking for log safety."""
+        from torshield_ai_gateway.providers import _mask_key
+        # Long key
+        self.assertEqual(_mask_key("abcdefghijklmnop"), "abcd...mnop")
+        # Short key
+        result = _mask_key("ab")
+        self.assertIn("***", result)
+        # Empty key
+        self.assertEqual(_mask_key(""), "<EMPTY>")
+
+    def test_backoff_delay_computation(self):
+        """Test exponential backoff delay computation."""
+        from torshield_ai_gateway.providers import _compute_backoff_delay
+        d0 = _compute_backoff_delay(0)
+        d1 = _compute_backoff_delay(1)
+        d2 = _compute_backoff_delay(2)
+        self.assertLess(d0, d1)
+        self.assertLess(d1, d2)
+
+    def test_retryable_http_codes(self):
+        """Test that correct HTTP codes are marked as retryable."""
+        from torshield_ai_gateway.providers import RETRYABLE_HTTP_CODES
+        self.assertIn(429, RETRYABLE_HTTP_CODES)
+        self.assertIn(500, RETRYABLE_HTTP_CODES)
+        self.assertIn(502, RETRYABLE_HTTP_CODES)
+        self.assertIn(503, RETRYABLE_HTTP_CODES)
+        self.assertIn(504, RETRYABLE_HTTP_CODES)
+        # Auth errors should NOT be retryable
+        self.assertNotIn(400, RETRYABLE_HTTP_CODES)
+        self.assertNotIn(401, RETRYABLE_HTTP_CODES)
+        self.assertNotIn(403, RETRYABLE_HTTP_CODES)
+
+
+class TestExtractText(unittest.TestCase):
+    """Test the _extract_text response parsing utility."""
+
+    def test_openai_format(self):
+        """Test parsing OpenAI-format response."""
+        from torshield_ai_gateway.providers import _BaseProvider
+        response = {"choices": [{"message": {"content": "Hello world"}}]}
+        self.assertEqual(_BaseProvider._extract_text(response), "Hello world")
+
+    def test_cf_format(self):
+        """Test parsing Cloudflare-format response."""
+        from torshield_ai_gateway.providers import _BaseProvider
+        response = {"result": {"response": "Hello world"}}
+        self.assertEqual(_BaseProvider._extract_text(response), "Hello world")
+
+    def test_fallback_to_str(self):
+        """Test fallback to string representation."""
+        from torshield_ai_gateway.providers import _BaseProvider
+        response = {"unknown": "format"}
+        result = _BaseProvider._extract_text(response)
+        self.assertIsInstance(result, str)
+        self.assertGreater(len(result), 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

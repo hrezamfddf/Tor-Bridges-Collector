@@ -1,0 +1,16 @@
+{
+  "transport_effectiveness": {
+    "snowflake": 0.88,
+    "webtunnel": 0.92,
+    "obfs4_443": 0.65,
+    "obfs4_iat2": 0.72,
+    "meek_lite": 0.55,
+    "vless_reality": 0.8,
+    "vanilla": 0.05
+  },
+  "nin_active": false,
+  "detected_isp": "mci",
+  "censorship_level": 3,
+  "connection_history": [],
+  "last_updated": "2026-06-11T21:50:18.999140+00:00"
+}

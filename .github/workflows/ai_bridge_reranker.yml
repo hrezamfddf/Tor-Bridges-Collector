@@ -1,0 +1,110 @@
+# TorShield-IR AI Bridge Re-Ranker v9.0
+# FIXED v9.1:
+#   - workflow_run trigger corrected to match main workflow name
+#     ("TorShield-IR Bridge Intelligence", not Stage-07 which never existed)
+#   - Added pip install -r requirements.txt (was missing, causing ModuleNotFoundError)
+#   - Fixed artifact download: name = "bridge-intelligence-report" (matches main workflow)
+#   - Fixed default input path: bridge/iran_results.json (was output/bridges_ranked.json)
+name: AI Bridge Re-Ranker (Iran)
+
+on:
+  workflow_run:
+    workflows: ["TorShield-IR Bridge Intelligence"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      bridge_file:
+        description: 'Path to bridge JSON file'
+        required: false
+        default: 'bridge/iran_results.json'
+
+jobs:
+  ai-rerank:
+    if: >
+      github.event.workflow_run.conclusion == 'success' ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: 'pip'
+
+      # FIX: was missing entirely — caused ModuleNotFoundError on every run
+      - name: Install Python dependencies
+        run: |
+          set -euo pipefail
+          pip install -r requirements.txt
+
+      # Download the bridge intelligence report from the main workflow run.
+      # Uses the correct artifact name "bridge-intelligence-report" which is
+      # what torshield-ir.yml actually uploads (was using "output/" before).
+      - name: Download Bridge Artifacts
+        if: ${{ github.event_name != 'workflow_dispatch' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: bridge-intelligence-report
+          run-id: ${{ github.event.workflow_run.id }}
+          path: bridge/
+        continue-on-error: true   # artifact may not exist on first run
+
+      # Ensure bridge directory and fallback files exist
+      - name: Ensure bridge dir and fallback files
+        run: |
+          set -euo pipefail
+          mkdir -p bridge data export
+          # If iran_results.json doesn't exist, create a minimal valid one
+          if [ ! -f bridge/iran_results.json ]; then
+            echo '{"bridges":[],"summary":{"total_tested":0}}' > bridge/iran_results.json
+            echo "WARNING: bridge/iran_results.json not found — created empty placeholder"
+          fi
+
+      - name: Run AI Re-Ranking
+        env:
+          CEREBRAS_API_KEY_1:   ${{ secrets.CEREBRAS_API_KEY_1 }}
+          CEREBRAS_API_KEY_2:   ${{ secrets.CEREBRAS_API_KEY_2 }}
+          CEREBRAS_API_KEY_3:   ${{ secrets.CEREBRAS_API_KEY_3 }}
+          PORTKEY_API_KEY_1:    ${{ secrets.PORTKEY_API_KEY_1 }}
+          PORTKEY_GATEWAY_URL:  ${{ secrets.PORTKEY_GATEWAY_URL }}
+          CF_ACCOUNT_ID_1:      ${{ secrets.CF_ACCOUNT_ID_1 }}
+          CF_API_TOKEN_1:       ${{ secrets.CF_API_TOKEN_1 }}
+          CF_AI_GATEWAY_URL_1:  ${{ secrets.CF_AI_GATEWAY_URL_1 }}
+          CF_ACCOUNT_ID_2:      ${{ secrets.CF_ACCOUNT_ID_2 }}
+          CF_API_TOKEN_2:       ${{ secrets.CF_API_TOKEN_2 }}
+          CF_AI_GATEWAY_URL_2:  ${{ secrets.CF_AI_GATEWAY_URL_2 }}
+          CF_ACCOUNT_ID_3:      ${{ secrets.CF_ACCOUNT_ID_3 }}
+          CF_API_TOKEN_3:       ${{ secrets.CF_API_TOKEN_3 }}
+          CF_AI_GATEWAY_URL_3:  ${{ secrets.CF_AI_GATEWAY_URL_3 }}
+          GITHUB_RUN_ID:        ${{ github.run_id }}
+          BRIDGE_FILE:          ${{ inputs.bridge_file || 'bridge/iran_results.json' }}
+        run: |
+          set -euo pipefail
+          python scripts/ai_bridge_reranker.py \
+            --input  "$BRIDGE_FILE" \
+            --output bridge/bridges_ai_iran_ranked.json \
+            --iran-mode strict \
+            --batch-size 20 || true
+          # Print summary if output exists
+          python3 -c "
+          import json, pathlib
+          p = pathlib.Path('bridge/bridges_ai_iran_ranked.json')
+          if p.exists():
+              d = json.loads(p.read_text())
+              bs = d.get('bridges', d) if isinstance(d, dict) else d
+              total = len(bs)
+              print(f'AI-ranked: {total} bridges')
+          " || true
+
+      - name: Upload AI-Ranked Bridges
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-iran-ranked-bridges-${{ github.run_id }}
+          path: bridge/bridges_ai_iran_ranked.json
+          retention-days: 30
+          if-no-files-found: ignore
