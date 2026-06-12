@@ -1,34 +1,41 @@
 """
-anti_censorship.py — Anti-Censorship Intelligence Engine for Iran
-==================================================================
+anti_censorship.py — Anti-Censorship & Anti-DPI Engine v1.0
+═══════════════════════════════════════════════════════════
+Intelligent censorship detection and evasion for Tor bridge
+connections in Iran. Provides transport probing, TLS fingerprint
+rotation, bridge scoring, adaptive retry, and traffic mimicry.
 
-Features:
-  1. Transport probe: Test obfs4/meek/snowflake/webtunnel availability
-  2. DPI fingerprint rotation: Randomize TLS ClientHello parameters
-  3. Bridge scoring: Score bridges by success rate in IRGC DPI environment
-  4. Adaptive retry: Switch transport protocol on detection
-  5. Traffic mimicry: Make AI gateway traffic look like HTTPS browsing
+ARCHITECTURE
+────────────
+  ┌──────────────────────────────────────────────┐
+  │         AntiCensorshipEngine                  │
+  ├──────────────────────────────────────────────┤
+  │  1. Transport Probing  (obfs4/webtunnel/...) │
+  │  2. TLS FP Rotation    (JA3/JA3S cycling)    │
+  │  3. DPI Detection      (403/407/451 + Persian)│
+  │  4. Bridge Scoring     (latency + uptime)     │
+  │  5. Adaptive Retry     (exponential + jitter) │
+  │  6. Traffic Mimicry    (HTTPS/WS camouflage)  │
+  └──────────────────────────────────────────────┘
 
-Iran-specific DPI signatures:
-  - deep-packet-inspection (DPI) at national level
-  - port-443-blocking (intermittent)
-  - SNI-filtering (Server Name Indication)
-  - IP-reputation scoring (TIC/ACI infrastructure)
-
-This module is ADDITIVE — it does not modify or replace any existing
-features. It integrates with the existing IranAutoDefense pipeline.
+IRAN DPI SIGNATURES
+───────────────────
+Iranian DPI systems use several detection methods:
+  - SNI filtering (blocks Tor-related Server Name Indication)
+  - TLS fingerprinting (JA3/JA3S matching known Tor patterns)
+  - HTTP header inspection (User-Agent, content-type anomalies)
+  - Statistical traffic analysis (packet size/timing patterns)
+  - Keyword filtering (Persian: "فیلتر", "فیلترینگ", etc.)
 """
 
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
-import os
 import random
 import re
-import struct
 import time
+import threading
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Dict, List, Optional, Set, Tuple
@@ -37,707 +44,614 @@ logger = logging.getLogger("torshield.anti_censorship")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# ENUMS AND DATA STRUCTURES
+# IRAN DPI SIGNATURE DATABASE
+# ═══════════════════════════════════════════════════════════════════════════
+
+IRAN_DPI_SIGNATURES: List[Dict[str, str]] = [
+    {
+        "name": "sni_filter_tor",
+        "description": "SNI-based filtering of Tor directory authorities",
+        "detection": "Connection reset after ClientHello with Tor-related SNI",
+        "evasion": "Use obfs4 or webtunnel to wrap TLS inside another protocol",
+    },
+    {
+        "name": "ja3_fingerprint_tor",
+        "description": "JA3 fingerprint matching for Tor client TLS patterns",
+        "detection": "TLS ClientHello cipher suite order matches known Tor client",
+        "evasion": "Rotate TLS fingerprint using mimicked browser JA3 hashes",
+    },
+    {
+        "name": "http_header_inspection",
+        "description": "HTTP header analysis for Tor bridge connection patterns",
+        "detection": "Anomalous User-Agent or missing standard browser headers",
+        "evasion": "Use traffic mimicry to simulate normal HTTPS browsing patterns",
+    },
+    {
+        "name": "statistical_traffic_analysis",
+        "description": "Packet size and timing analysis to detect Tor traffic",
+        "detection": "Cell-sized (512B) packets with regular timing intervals",
+        "evasion": "Add padding and timing jitter to disguise traffic patterns",
+    },
+    {
+        "name": "keyword_filter_persian",
+        "description": "Persian keyword filtering in HTTP responses",
+        "detection": "Responses containing 'فیلتر' or 'فیلترینگ' are intercepted",
+        "evasion": "Use encrypted transports (obfs4) to prevent content inspection",
+    },
+    {
+        "name": "dns_poisoning",
+        "description": "DNS poisoning for Tor directory authority domains",
+        "detection": "DNS responses returning incorrect IPs for torproject.org",
+        "evasion": "Use DNS-over-HTTPS or hard-coded bridge IP addresses",
+    },
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TRANSPORT TYPES
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TransportType(Enum):
-    """Tor transport protocol types."""
-    OBFS4 = "obfs4"
-    WEBTUNNEL = "webtunnel"
-    MEEK_LITE = "meek_lite"
-    SNOWFLAKE = "snowflake"
-    VANILLA = "vanilla"
-
-
-class DPIAction(Enum):
-    """Actions to take when DPI is detected."""
-    CONTINUE = auto()
-    SWITCH_TRANSPORT = auto()
-    ROTATE_FINGERPRINT = auto()
-    BACKOFF_AND_RETRY = auto()
-    ABORT = auto()
-
-
-class CensorshipLevel(Enum):
-    """Censorship severity levels in Iran."""
-    MINIMAL = 0       # Normal internet
-    MODERATE = 1      # Some sites blocked, Tor partially accessible
-    SEVERE = 2        # Heavy DPI, most bridges blocked
-    NIN_SHUTDOWN = 3  # National Information Network — international cut
+    """Available anti-censorship transport types."""
+    OBF4 = auto()        # obfs4 — most reliable, widely deployed
+    WEBTUNNEL = auto()   # webtunnel — HTTPS-based, good for Iran
+    MEEK_LITE = auto()   # meek_lite — domain fronting via CDN
+    SNOWFLAKE = auto()   # snowflake — WebRTC-based, ephemeral proxies
+    VANILLA = auto()     # vanilla — direct connection (no transport)
 
 
 @dataclass
-class TransportScore:
-    """Score for a transport protocol in the current censorship environment."""
+class TransportProbeResult:
+    """Result of probing a single transport type."""
     transport: TransportType
+    success: bool
+    latency_ms: float = 0.0
+    bandwidth_kbps: float = 0.0
+    error: str = ""
+
+
+@dataclass
+class BridgeInfo:
+    """Information about a Tor bridge for scoring."""
+    address: str
+    port: int
+    transport: TransportType = TransportType.VANILLA
+    fingerprint: str = ""
+    latency_ms: float = 0.0
+    uptime_pct: float = 0.0
+    bandwidth_kbps: float = 0.0
+    last_success_ts: float = 0.0
+    failure_count: int = 0
     score: float = 0.0
-    success_rate: float = 0.0
-    avg_latency_ms: float = 0.0
-    detection_rate: float = 0.0  # How often DPI detects this transport
-    last_probe_time: float = 0.0
-
-
-@dataclass
-class DPIEvent:
-    """Record of a DPI detection event."""
-    timestamp: float
-    transport: TransportType
-    action_taken: DPIAction
-    signature_detected: str = ""
-    response_code: int = 0
-    response_size: int = 0
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# IRAN DPI SIGNATURES
+# JA3/JA3S TLS FINGERPRINT DATABASE
 # ═══════════════════════════════════════════════════════════════════════════
 
-class IranDPISignatures:
-    """Known DPI signatures used by Iranian internet infrastructure.
+# Known browser JA3 fingerprints for rotation (top browsers in Iran)
+_BROWSER_JA3_HASHES: List[Dict[str, str]] = [
+    {
+        "name": "Chrome_137_Desktop",
+        "ja3": "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-27-17513,29-23-24,0",
+        "ja3s": "771,4865-4866-4867,0-23-65281-10-11-35-16-5-13,29-23-24,0",
+    },
+    {
+        "name": "Firefox_128_Desktop",
+        "ja3": "771,4865-4867-4866-49195-49199-52393-52392-49196-49200-49162-49161-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-34-51-43-13-45-28-27,29-23-24-25,0",
+        "ja3s": "771,4865-4866-4867,0-23-65281-10-11-35-16-5-13,29-23-24,0",
+    },
+    {
+        "name": "Safari_17_iOS",
+        "ja3": "771,4865-4866-4867-49196-49195-52393-49200-49199-49172-49171-49162-49161-157-156-53-47-10,0-23-65281-10-11-35-16-5-13-51-45-43-21,29-23-24,0",
+        "ja3s": "771,4866-4867-4865,0-23-65281-10-11-35-16-5-13,29-23-24,0",
+    },
+    {
+        "name": "Edge_137_Desktop",
+        "ja3": "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-27-17513,29-23-24,0",
+        "ja3s": "771,4865-4866-4867,0-23-65281-10-11-35-16-5-13,29-23-24,0",
+    },
+]
 
-    Based on public research and OONI measurements:
-    - SIAM (Smart Integrated Account Management) — TIC/ACI infrastructure
-    - NGFW (Next-Generation Firewall) — 8-layer deep packet inspection
-    - SNI-based filtering (TLS ClientHello inspection)
-    - IP reputation scoring (blocklists maintained by TIC)
+
+class TLSFingerprintRotator:
+    """Rotates TLS fingerprints (JA3/JA3S) to evade DPI fingerprinting.
+
+    Iranian DPI systems maintain databases of known Tor client TLS
+    fingerprints. By rotating through browser-like JA3 hashes, we
+    reduce the chance of TLS-layer detection. This is a simulation
+    layer — actual TLS fingerprint manipulation requires utls library.
     """
 
-    SIGNATURES = {
-        "deep-packet-inspection": {
-            "description": "National DPI system analyzing packet payloads",
-            "detection_methods": ["payload_pattern", "statistical_analysis"],
-            "evasion_difficulty": "high",
-        },
-        "port-443-blocking": {
-            "description": "Intermittent blocking of port 443 for suspicious IPs",
-            "detection_methods": ["connection_timeout", "rst_injection"],
-            "evasion_difficulty": "medium",
-        },
-        "sni-filtering": {
-            "description": "TLS ClientHello SNI field inspection and filtering",
-            "detection_methods": ["sni_blacklist", "sni_regex_match"],
-            "evasion_difficulty": "high",
-        },
-        "ip-reputation": {
-            "description": "IP-based blocking using TIC/ACI reputation lists",
-            "detection_methods": ["connection_refused", "timeout"],
-            "evasion_difficulty": "medium",
-        },
-    }
+    def __init__(self) -> None:
+        self._fp_index: int = 0
+        self._rotation_count: int = 0
+        self._last_rotation_ts: float = 0.0
+        self._lock = threading.Lock()
 
-    # Known DPI block indicators in HTTP responses
-    BLOCK_INDICATORS_PERSIAN = [
-        "\u0641\u06cc\u0644\u062a\u0631",  # فیلتر (filter)
-        "\u0645\u062d\u062f\u0648\u062f",  # محدود (limited)
-        "\u062f\u0633\u062a\u0631\u0633\u06cc",  # دسترسی (access)
-        "\u0642\u0627\u0646\u0648\u0646",  # قانون (law)
-    ]
+    @property
+    def current_fingerprint(self) -> Dict[str, str]:
+        """Return the current active JA3 fingerprint."""
+        with self._lock:
+            return _BROWSER_JA3_HASHES[self._fp_index]
 
-    # DPI-specific HTTP status codes
-    DPI_HTTP_CODES = {403, 407, 451}
+    def rotate_tls_fingerprint(self) -> Dict[str, str]:
+        """Rotate to the next browser TLS fingerprint.
 
-    @classmethod
-    def is_block_response(cls, status_code: int, body: str = "") -> bool:
-        """Check if an HTTP response indicates DPI-based blocking."""
-        if status_code in cls.DPI_HTTP_CODES:
-            return True
-        # Check for empty 200 responses (silent DPI drop)
-        if status_code == 200 and not body.strip():
-            return True
-        # Check for Persian block indicators
-        body_lower = body.lower()
-        for indicator in cls.BLOCK_INDICATORS_PERSIAN:
-            if indicator in body_lower:
+        Selects the next fingerprint in a round-robin fashion with
+        random jitter to avoid predictable rotation patterns. This
+        method is called when DPI detection is suspected or
+        periodically to proactively change fingerprints.
+
+        Returns:
+            Dict containing 'name', 'ja3', and 'ja3s' of the new fingerprint.
+        """
+        with self._lock:
+            # Round-robin with random offset to avoid predictable patterns
+            offset = random.randint(1, len(_BROWSER_JA3_HASHES) - 1)
+            self._fp_index = (self._fp_index + offset) % len(_BROWSER_JA3_HASHES)
+            self._rotation_count += 1
+            self._last_rotation_ts = time.monotonic()
+
+            new_fp = _BROWSER_JA3_HASHES[self._fp_index]
+            logger.info(
+                f"[AntiCensorship] TLS fingerprint rotated → {new_fp['name']} "
+                f"(rotation #{self._rotation_count})"
+            )
+            return new_fp
+
+    def should_rotate(self, request_count: int = 0, error_count: int = 0) -> bool:
+        """Determine if TLS fingerprint should be rotated.
+
+        Rotation is recommended when:
+        - More than 50 requests since last rotation (proactive)
+        - Any DPI-related errors detected (reactive)
+        - More than 10 minutes since last rotation (time-based)
+
+        Args:
+            request_count: Number of requests since last rotation check.
+            error_count: Number of DPI-related errors detected.
+
+        Returns:
+            True if rotation is recommended.
+        """
+        with self._lock:
+            time_since_rotation = time.monotonic() - self._last_rotation_ts
+
+            if error_count > 0:
                 return True
-        return False
+            if request_count > 50:
+                return True
+            if time_since_rotation > 600:  # 10 minutes
+                return True
+            return False
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# ANTI-CENSORSHIP ENGINE
+# DPI DETECTION ENGINE
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Persian keywords that indicate filtering/blocking
+_PERSIAN_FILTER_KEYWORDS: List[str] = [
+    "فیلتر",
+    "فیلترینگ",
+    "فیلترشکن",
+    "دسترسی محدود",
+    "ممنوع",
+]
+
+# HTTP status codes that indicate DPI interception
+_DPI_HTTP_CODES: Set[int] = {403, 407, 451}
+
+# Regex for detecting DPI interception pages
+_DPI_PAGE_PATTERNS: List[re.Pattern] = [
+    re.compile(r"access\s+denied", re.IGNORECASE),
+    re.compile(r"blocked\s+by\s+firewall", re.IGNORECASE),
+    re.compile(r"content\s+filtered", re.IGNORECASE),
+    re.compile(r"national\s+information\s+network", re.IGNORECASE),
+    re.compile(r"پیشخوان", re.IGNORECASE),  # Iranian NIN portal
+]
+
+
+class DPIDetector:
+    """Detects Iranian DPI interception from HTTP responses.
+
+    Analyzes HTTP status codes, response bodies, and Persian keywords
+    to determine if a request was intercepted by Iranian censorship
+    infrastructure. Detection triggers TLS rotation and transport
+    switching in the AntiCensorshipEngine.
+    """
+
+    @staticmethod
+    def is_request_blocked(
+        status_code: int = 0,
+        response_body: str = "",
+        response_headers: Optional[Dict[str, str]] = None,
+    ) -> Tuple[bool, str]:
+        """Check if an HTTP response indicates DPI interception.
+
+        Detection is based on multiple heuristics:
+        1. HTTP status codes 403 (Forbidden), 407 (Proxy Auth), 451 (Legal)
+        2. Persian filtering keywords in response body
+        3. Known DPI interception page patterns
+        4. Empty 200 responses (sometimes used by Iranian DPI)
+        5. Custom headers added by Iranian ISPs
+
+        Args:
+            status_code: HTTP response status code.
+            response_body: Response body text.
+            response_headers: Response headers dict.
+
+        Returns:
+            Tuple of (is_blocked: bool, reason: str).
+        """
+        # Check 1: DPI-specific HTTP status codes
+        if status_code in _DPI_HTTP_CODES:
+            reason = f"HTTP {status_code} — DPI interception status code"
+            logger.warning(f"[AntiCensorship] DPI detected: {reason}")
+            return True, reason
+
+        # Check 2: Persian filtering keywords in response body
+        if response_body:
+            for keyword in _PERSIAN_FILTER_KEYWORDS:
+                if keyword in response_body:
+                    reason = f"Persian filter keyword '{keyword}' found in response"
+                    logger.warning(f"[AntiCensorship] DPI detected: {reason}")
+                    return True, reason
+
+        # Check 3: DPI interception page patterns
+        if response_body:
+            for pattern in _DPI_PAGE_PATTERNS:
+                if pattern.search(response_body):
+                    reason = f"DPI interception page pattern matched: {pattern.pattern}"
+                    logger.warning(f"[AntiCensorship] DPI detected: {reason}")
+                    return True, reason
+
+        # Check 4: Empty 200 response (Iranian DPI sometimes returns this)
+        if status_code == 200 and not response_body.strip():
+            reason = "Empty 200 response — possible DPI interception"
+            logger.debug(f"[AntiCensorship] Possible DPI: {reason}")
+            return True, reason
+
+        # Check 5: Custom headers from Iranian ISPs
+        if response_headers:
+            for key, value in response_headers.items():
+                key_lower = key.lower()
+                if "x-filter" in key_lower or "x-block" in key_lower:
+                    reason = f"ISP filtering header detected: {key}: {value}"
+                    logger.warning(f"[AntiCensorship] DPI detected: {reason}")
+                    return True, reason
+
+        return False, ""
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# BRIDGE SCORING ENGINE
+# ═══════════════════════════════════════════════════════════════════════════
+
+class BridgeScorer:
+    """Scores Tor bridges based on multiple factors for optimal selection.
+
+    Scoring factors:
+    - Latency (lower is better, 0-30 pts)
+    - Uptime percentage (higher is better, 0-25 pts)
+    - Transport type (obfs4/webtunnel preferred for Iran, 0-20 pts)
+    - Bandwidth (higher is better, 0-15 pts)
+    - Recent failures penalty (-5 pts per failure, max -25)
+    """
+
+    # Transport preference scores for Iran (obfs4/webtunnel best)
+    _TRANSPORT_SCORES: Dict[TransportType, float] = {
+        TransportType.OBF4: 20.0,
+        TransportType.WEBTUNNEL: 18.0,
+        TransportType.SNOWFLAKE: 15.0,
+        TransportType.MEEK_LITE: 12.0,
+        TransportType.VANILLA: 2.0,  # Very bad for Iran
+    }
+
+    def score_bridge(self, bridge: BridgeInfo) -> float:
+        """Calculate composite score for a bridge.
+
+        Args:
+            bridge: Bridge information with metrics.
+
+        Returns:
+            Score from 0-100.
+        """
+        # Latency score (0-30): < 100ms = 30, > 2000ms = 0
+        if bridge.latency_ms <= 0:
+            latency_score = 15.0  # Unknown latency → neutral
+        elif bridge.latency_ms < 100:
+            latency_score = 30.0
+        elif bridge.latency_ms < 500:
+            latency_score = 30.0 * (1.0 - (bridge.latency_ms - 100) / 400)
+        elif bridge.latency_ms < 2000:
+            latency_score = 30.0 * (1.0 - (bridge.latency_ms - 100) / 1900) * 0.5
+        else:
+            latency_score = 0.0
+
+        # Uptime score (0-25)
+        uptime_score = 25.0 * (bridge.uptime_pct / 100.0)
+
+        # Transport score (0-20)
+        transport_score = self._TRANSPORT_SCORES.get(bridge.transport, 5.0)
+
+        # Bandwidth score (0-15)
+        if bridge.bandwidth_kbps <= 0:
+            bandwidth_score = 7.5  # Unknown → neutral
+        elif bridge.bandwidth_kbps < 100:
+            bandwidth_score = 5.0
+        elif bridge.bandwidth_kbps < 1000:
+            bandwidth_score = 10.0
+        else:
+            bandwidth_score = 15.0
+
+        # Failure penalty
+        failure_penalty = min(25.0, bridge.failure_count * 5.0)
+
+        total = max(0.0, latency_score + uptime_score + transport_score + bandwidth_score - failure_penalty)
+        return round(total, 2)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ADAPTIVE RETRY ENGINE
+# ═══════════════════════════════════════════════════════════════════════════
+
+class AdaptiveRetryEngine:
+    """Adaptive retry engine with DPI-aware backoff strategies.
+
+    When DPI is detected, uses longer delays and transport switching.
+    For normal network errors, uses standard exponential backoff.
+    """
+
+    def __init__(
+        self,
+        base_delay: float = 1.0,
+        max_delay: float = 120.0,
+        jitter: float = 2.0,
+        max_retries: int = 5,
+    ) -> None:
+        self._base_delay = base_delay
+        self._max_delay = max_delay
+        self._jitter = jitter
+        self._max_retries = max_retries
+        self._attempt = 0
+        self._dpi_detected = False
+
+    def compute_delay(self, attempt: int, is_dpi_error: bool = False) -> float:
+        """Compute adaptive backoff delay for the given attempt.
+
+        For DPI errors, uses 3x longer base delay and adds extra
+        jitter to avoid predictable retry patterns that DPI systems
+        can detect and block.
+
+        Args:
+            attempt: Current attempt number (0-indexed).
+            is_dpi_error: Whether the error was caused by DPI detection.
+
+        Returns:
+            Delay in seconds before the next retry.
+        """
+        multiplier = 3.0 if is_dpi_error else 1.0
+        raw = self._base_delay * multiplier * (2 ** attempt)
+        jitter_amount = random.uniform(-self._jitter, self._jitter)
+        if is_dpi_error:
+            jitter_amount *= 3.0  # Extra jitter for DPI evasion
+        delayed = raw + jitter_amount
+        return min(max(delayed, 0.1), self._max_delay)
+
+    def should_retry(self, attempt: int, is_dpi_error: bool = False) -> bool:
+        """Determine if another retry should be attempted.
+
+        For DPI errors, allows fewer retries (waste of time if blocked).
+        For network errors, allows the full retry budget.
+
+        Args:
+            attempt: Current attempt number.
+            is_dpi_error: Whether the error was DPI-related.
+
+        Returns:
+            True if another retry should be attempted.
+        """
+        if is_dpi_error:
+            max_for_dpi = min(self._max_retries, 3)
+            return attempt < max_for_dpi
+        return attempt < self._max_retries
+
+    def mark_dpi_detected(self) -> None:
+        """Mark that DPI interception has been detected.
+
+        This triggers transport switching and longer backoff delays
+        for subsequent retries.
+        """
+        self._dpi_detected = True
+        logger.info("[AntiCensorship] DPI detection flagged — using longer backoff delays")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# MAIN ANTI-CENSORSHIP ENGINE
 # ═══════════════════════════════════════════════════════════════════════════
 
 class AntiCensorshipEngine:
+    """Main anti-censorship engine coordinating all evasion strategies.
+
+    This engine provides a unified interface for:
+    1. Selecting optimal transport types for Iran
+    2. Rotating TLS fingerprints proactively and reactively
+    3. Detecting DPI interception from HTTP responses
+    4. Scoring and ranking available Tor bridges
+    5. Adaptive retry with DPI-aware backoff
+    6. Traffic mimicry to camouflage Tor traffic
+
+    Usage:
+        engine = AntiCensorshipEngine()
+        # Select best transport for a bridge
+        transport = engine.select_optimal_transport(bridge_info)
+        # Check if a response indicates DPI
+        blocked, reason = engine.is_request_blocked(status_code, body)
+        # Rotate TLS fingerprint
+        engine.rotate_tls_fingerprint()
     """
-    Anti-censorship intelligence engine for Iran.
 
-    Provides:
-    - Transport probing and scoring
-    - DPI fingerprint rotation
-    - Adaptive transport switching
-    - Traffic mimicry for AI gateway requests
-    - Bridge scoring in DPI environments
-    """
+    def __init__(self) -> None:
+        self._tls_rotator = TLSFingerprintRotator()
+        self._dpi_detector = DPIDetector()
+        self._bridge_scorer = BridgeScorer()
+        self._retry_engine = AdaptiveRetryEngine()
+        self._preferred_transport: TransportType = TransportType.OBF4
+        self._transport_history: List[TransportType] = []
+        self._lock = threading.Lock()
 
-    IRAN_DPI_SIGNATURES = [
-        "deep-packet-inspection", "port-443-blocking",
-        "sni-filtering", "ip-reputation",
-    ]
-
-    # Transport preference order for different censorship levels
-    _TRANSPORT_PREFERENCE = {
-        CensorshipLevel.MINIMAL: [
-            TransportType.OBFS4,
-            TransportType.SNOWFLAKE,
-            TransportType.WEBTUNNEL,
-            TransportType.MEEK_LITE,
-        ],
-        CensorshipLevel.MODERATE: [
-            TransportType.WEBTUNNEL,
-            TransportType.OBFS4,
-            TransportType.SNOWFLAKE,
-            TransportType.MEEK_LITE,
-        ],
-        CensorshipLevel.SEVERE: [
-            TransportType.SNOWFLAKE,
-            TransportType.WEBTUNNEL,
-            TransportType.MEEK_LITE,
-            TransportType.OBFS4,
-        ],
-        CensorshipLevel.NIN_SHUTDOWN: [
-            TransportType.SNOWFLAKE,
-            TransportType.MEEK_LITE,
-            TransportType.WEBTUNNEL,
-        ],
-    }
-
-    # JA3 fingerprint database for rotation
-    _JA3_FINGERPRINTS = [
-        # Chrome on Windows
-        "769,47,0-5-10-11-23-65281-35-16-17513-18-51-45-13-27-21-22-23-19-17,0-23-65281-35-16-11-13,29-23-24,0",
-        # Firefox on Linux
-        "769,47,0-23-65281-35-16-11-13,0-23-65281-35-16-11-13,29-23-24,0",
-        # Safari on macOS
-        "769,47,0-5-10-11-23-65281-35-16-17513-18-51-45-13-27-21-22-23-19-17,0-23-65281-35-16-11-13,29-23-24,0",
-        # Edge on Windows
-        "769,47,0-5-10-11-23-65281-35-16-17513-18-51-45-13-27-21-22-23-19-17,0-23-65281-35,29-23-24,0",
-    ]
-
-    def __init__(self):
-        self._transport_scores: Dict[TransportType, TransportScore] = {}
-        self._dpi_events: List[DPIEvent] = []
-        self._censorship_level = CensorshipLevel.MODERATE
-        self._current_ja3_index = 0
-        self._last_probe_time: float = 0.0
-        self._probe_interval: float = 3600.0  # Re-probe every hour
-        self._bridge_scores: Dict[str, float] = {}  # bridge_fingerprint → score
-        logger.info(
-            "[AntiCensorship] Engine initialized for Iran DPI environment"
-        )
-
-    def assess_censorship_level(self) -> CensorshipLevel:
-        """
-        Assess current censorship level in Iran by analyzing recent DPI events.
-
-        Uses a sliding window of the last 60 minutes of events to determine
-        the severity of internet censorship. The assessment considers:
-        - Frequency of DPI detections
-        - Types of DPI signatures encountered
-        - Success rates of different transport protocols
-        - Whether NIN (National Information Network) shutdown indicators exist
-
-        Returns:
-            Current estimated CensorshipLevel
-        """
-        now = time.time()
-        window = 3600.0  # 60 minutes
-        recent_events = [
-            e for e in self._dpi_events
-            if now - e.timestamp < window
-        ]
-
-        if not recent_events:
-            # No recent DPI events — assume minimal censorship
-            self._censorship_level = CensorshipLevel.MINIMAL
-            return self._censorship_level
-
-        # Count events by type
-        detection_rate = len(recent_events) / max(window / 60.0, 1.0)
-        sni_detections = sum(
-            1 for e in recent_events
-            if "sni" in e.signature_detected.lower()
-        )
-        block_events = sum(
-            1 for e in recent_events
-            if e.action_taken in (DPIAction.SWITCH_TRANSPORT, DPIAction.ABORT)
-        )
-
-        # Classify censorship level
-        if detection_rate > 10 and sni_detections > 5:
-            self._censorship_level = CensorshipLevel.NIN_SHUTDOWN
-        elif detection_rate > 5 and block_events > 3:
-            self._censorship_level = CensorshipLevel.SEVERE
-        elif detection_rate > 2 or block_events > 1:
-            self._censorship_level = CensorshipLevel.MODERATE
-        else:
-            self._censorship_level = CensorshipLevel.MINIMAL
-
-        logger.info(
-            f"[AntiCensorship] Censorship level assessed: "
-            f"{self._censorship_level.name} "
-            f"(detection_rate={detection_rate:.1f}/min, "
-            f"sni_detections={sni_detections}, "
-            f"block_events={block_events})"
-        )
-        return self._censorship_level
-
-    def select_optimal_transport(self, target_country: str = "IR") -> str:
-        """
-        Select best transport based on current censorship profile.
-
-        For Iran (IR), the selection considers:
-        - Current DPI intensity and signatures
-        - Historical success rates of each transport
-        - Bridge availability and freshness
-        - CDN-fronting capability (webtunnel, meek)
-
-        The method first assesses the current censorship level, then
-        consults the transport preference table for that level. Within
-        each preference tier, transports are scored by their recent
-        success rate and latency.
-
-        Args:
-            target_country: ISO country code (default: "IR" for Iran)
-
-        Returns:
-            Transport type string (e.g., "obfs4", "webtunnel")
-        """
-        level = self.assess_censorship_level()
-        preferences = self._TRANSPORT_PREFERENCE.get(
-            level, self._TRANSPORT_PREFERENCE[CensorshipLevel.MODERATE]
-        )
-
-        # Score each preferred transport
-        scores: Dict[TransportType, float] = {}
-        for transport in preferences:
-            ts = self._transport_scores.get(transport)
-            if ts:
-                # Base score from preference order
-                base = (len(preferences) - preferences.index(transport)) * 10.0
-                # Adjust by success rate
-                adjusted = base * (1.0 + ts.success_rate)
-                # Penalize by detection rate
-                adjusted *= (1.0 - ts.detection_rate * 0.5)
-                scores[transport] = adjusted
-            else:
-                # No probe data — use preference order
-                scores[transport] = (
-                    len(preferences) - preferences.index(transport)
-                ) * 10.0
-
-        if not scores:
-            return TransportType.SNOWFLAKE.value
-
-        best = max(scores, key=scores.get)
-        logger.info(
-            f"[AntiCensorship] Selected transport: {best.value} "
-            f"(level={level.name}, score={scores[best]:.1f})"
-        )
-        return best.value
-
-    def rotate_tls_fingerprint(self) -> str:
-        """
-        Rotate TLS ClientHello parameters to avoid fingerprinting.
-
-        Implements JA3/JA3S fingerprint rotation by cycling through
-        a database of known browser fingerprints. This makes the AI
-        gateway traffic appear as different browser types on each
-        connection, preventing DPI systems from correlating sessions.
-
-        The rotation strategy is:
-        1. Cycle through the fingerprint database
-        2. Add random jitter to TLS extensions order
-        3. Vary cipher suite ordering slightly
-        4. Rotate User-Agent to match the JA3 fingerprint
-
-        Returns:
-            The new JA3 fingerprint string being used
-        """
-        self._current_ja3_index = (
-            (self._current_ja3_index + 1) % len(self._JA3_FINGERPRINTS)
-        )
-        new_ja3 = self._JA3_FINGERPRINTS[self._current_ja3_index]
-
-        # Add minor random variation to avoid exact fingerprint matching
-        # This simulates natural browser variation across updates
-        parts = new_ja3.split(",")
-        if len(parts) >= 3:
-            cipher_list = parts[2].split("-")
-            if len(cipher_list) > 3:
-                # Slightly reorder the last few ciphers
-                tail = cipher_list[-3:]
-                random.shuffle(tail)
-                cipher_list[-3:] = tail
-                parts[2] = "-".join(cipher_list)
-
-        rotated = ",".join(parts)
-        logger.debug(
-            f"[AntiCensorship] TLS fingerprint rotated: "
-            f"JA3 index={self._current_ja3_index}"
-        )
-        return rotated
-
-    def is_request_blocked(self, response) -> bool:
-        """
-        Detect if a request was intercepted by DPI.
-
-        Checks multiple indicators:
-        - HTTP status codes commonly used for censorship (403, 407, 451)
-        - Persian language block page indicators
-        - Empty 200 responses (silent DPI drops)
-        - Unusual response patterns indicating interception
-
-        Args:
-            response: Object with status_code and text attributes,
-                      or a tuple of (status_code, body_text)
-
-        Returns:
-            True if DPI interception is suspected
-        """
-        if isinstance(response, tuple):
-            status_code, body = response[0], response[1] if len(response) > 1 else ""
-        else:
-            status_code = getattr(response, 'status_code', 0)
-            body = getattr(response, 'text', "")
-
-        return IranDPISignatures.is_block_response(status_code, body)
-
-    def record_dpi_event(
+    def select_optimal_transport(
         self,
-        transport: TransportType,
-        action: DPIAction,
-        signature: str = "",
-        response_code: int = 0,
-        response_size: int = 0,
-    ) -> None:
-        """
-        Record a DPI detection event for analysis.
+        bridge: Optional[BridgeInfo] = None,
+        available_transports: Optional[List[TransportType]] = None,
+    ) -> TransportType:
+        """Select the optimal transport type for the current conditions.
 
-        This method logs the event and updates the transport scores
-        based on the detection. Events are kept in a sliding window
-        of the last 24 hours for trend analysis.
+        For Iran, the transport preference is:
+        1. obfs4 — most reliable, widely deployed
+        2. webtunnel — HTTPS-based, looks like normal web traffic
+        3. snowflake — WebRTC-based, ephemeral proxies
+        4. meek_lite — domain fronting (sometimes blocked)
+        5. vanilla — direct (almost always blocked in Iran)
+
+        If a specific bridge is provided, its transport type is
+        preferred if it's available. Otherwise, the best general
+        transport is selected based on recent success history.
 
         Args:
-            transport: The transport protocol that was detected
-            action: The action taken in response
-            signature: The DPI signature that was detected
-            response_code: HTTP status code from the response
-            response_size: Size of the response body in bytes
+            bridge: Optional specific bridge to select transport for.
+            available_transports: List of available transport types.
+
+        Returns:
+            The recommended TransportType.
         """
-        event = DPIEvent(
-            timestamp=time.time(),
-            transport=transport,
-            action_taken=action,
-            signature_detected=signature,
-            response_code=response_code,
-            response_size=response_size,
-        )
-        self._dpi_events.append(event)
+        if available_transports is None:
+            available_transports = [
+                TransportType.OBF4,
+                TransportType.WEBTUNNEL,
+                TransportType.SNOWFLAKE,
+                TransportType.MEEK_LITE,
+            ]
 
-        # Update transport detection rate
-        ts = self._transport_scores.get(transport)
-        if ts:
-            ts.detection_rate = min(
-                1.0,
-                ts.detection_rate + 0.05,
-            )
+        if bridge and bridge.transport in available_transports:
+            with self._lock:
+                self._preferred_transport = bridge.transport
+                self._transport_history.append(bridge.transport)
+            return bridge.transport
 
-        # Trim old events (keep last 24 hours)
-        cutoff = time.time() - 86400.0
-        self._dpi_events = [
-            e for e in self._dpi_events if e.timestamp > cutoff
+        # Select based on preference order for Iran
+        preference = [
+            TransportType.OBF4,
+            TransportType.WEBTUNNEL,
+            TransportType.SNOWFLAKE,
+            TransportType.MEEK_LITE,
         ]
 
-        logger.warning(
-            f"[AntiCensorship] DPI event recorded: "
-            f"transport={transport.value}, action={action.name}, "
-            f"signature={signature or 'unknown'}, "
-            f"http_code={response_code}"
-        )
+        for transport in preference:
+            if transport in available_transports:
+                with self._lock:
+                    self._preferred_transport = transport
+                    self._transport_history.append(transport)
+                logger.info(
+                    f"[AntiCensorship] Selected transport: {transport.name} "
+                    f"(preferred for Iran DPI evasion)"
+                )
+                return transport
 
-    def score_bridge(
+        # Fallback to first available
+        selected = available_transports[0] if available_transports else TransportType.VANILLA
+        with self._lock:
+            self._preferred_transport = selected
+            self._transport_history.append(selected)
+        return selected
+
+    def rotate_tls_fingerprint(self) -> Dict[str, str]:
+        """Rotate the TLS fingerprint to evade DPI detection.
+
+        Delegates to TLSFingerprintRotator for actual rotation.
+        Called proactively or reactively when DPI is suspected.
+
+        Returns:
+            Dict with 'name', 'ja3', 'ja3s' of the new fingerprint.
+        """
+        return self._tls_rotator.rotate_tls_fingerprint()
+
+    def is_request_blocked(
         self,
-        bridge_line: str,
-        transport: TransportType,
-        connectivity_ok: bool,
-        latency_ms: float = 0.0,
-    ) -> float:
-        """
-        Score a bridge by its expected success rate in Iran DPI environment.
+        status_code: int = 0,
+        response_body: str = "",
+        response_headers: Optional[Dict[str, str]] = None,
+    ) -> Tuple[bool, str]:
+        """Check if an HTTP response indicates DPI interception.
 
-        Scoring factors:
-        - Transport type (snowflake/webtunnel score higher under heavy DPI)
-        - Connectivity test result
-        - Latency (lower is better)
-        - CDN-fronting capability
-        - Port number (443 preferred, unusual ports penalized)
-        - Freshness of the bridge
+        Delegates to DPIDetector for analysis. If DPI is detected,
+        automatically triggers TLS fingerprint rotation.
 
         Args:
-            bridge_line: The bridge configuration line
-            transport: Transport protocol of the bridge
-            connectivity_ok: Whether the bridge passes TCP/TLS connectivity test
-            latency_ms: Measured latency in milliseconds
+            status_code: HTTP response status code.
+            response_body: Response body text.
+            response_headers: Response headers dict.
 
         Returns:
-            Score from 0.0 to 100.0
+            Tuple of (is_blocked: bool, reason: str).
         """
-        score = 50.0  # Base score
+        is_blocked, reason = self._dpi_detector.is_request_blocked(
+            status_code, response_body, response_headers
+        )
+        if is_blocked:
+            self._retry_engine.mark_dpi_detected()
+            # Auto-rotate TLS fingerprint on DPI detection
+            self._tls_rotator.rotate_tls_fingerprint()
+        return is_blocked, reason
 
-        # Transport bonus/penalty based on DPI resilience
-        transport_bonus = {
-            TransportType.SNOWFLAKE: 20.0,
-            TransportType.WEBTUNNEL: 18.0,
-            TransportType.MEEK_LITE: 15.0,
-            TransportType.OBFS4: 10.0,
-            TransportType.VANILLA: -10.0,
-        }
-        score += transport_bonus.get(transport, 0.0)
-
-        # Connectivity
-        if connectivity_ok:
-            score += 15.0
-        else:
-            score -= 30.0
-
-        # Latency scoring (under 500ms is good, over 3s is bad)
-        if latency_ms > 0:
-            if latency_ms < 500:
-                score += 10.0
-            elif latency_ms < 1500:
-                score += 5.0
-            elif latency_ms < 3000:
-                score += 0.0
-            else:
-                score -= 10.0
-
-        # Port analysis
-        if ":443" in bridge_line:
-            score += 8.0  # Port 443 blends with HTTPS traffic
-        elif ":80" in bridge_line:
-            score += 3.0  # Port 80 is somewhat expected
-        elif re.search(r":\d{5}", bridge_line):
-            score -= 5.0  # High ports are suspicious to DPI
-
-        # CDN fronting detection
-        if "cdn" in bridge_line.lower() or "cloudflare" in bridge_line.lower():
-            score += 12.0  # CDN-fronted bridges resist IP blocking
-
-        # Clamp to valid range
-        score = max(0.0, min(100.0, score))
-
-        # Cache the score
-        bridge_hash = hashlib.sha256(bridge_line.encode()).hexdigest()[:16]
-        self._bridge_scores[bridge_hash] = score
-
-        return score
-
-    def get_traffic_mimicry_headers(self) -> dict:
-        """
-        Generate HTTP headers that make AI gateway traffic look like
-        normal HTTPS browsing traffic.
-
-        Returns a set of headers that mimic a common browser request,
-        including proper Accept, Accept-Language, and other headers
-        that DPI systems expect to see in legitimate HTTPS browsing.
-
-        Returns:
-            Dictionary of HTTP headers for traffic mimicry
-        """
-        # Rotate fingerprint first
-        ja3 = self.rotate_tls_fingerprint()
-
-        # Select matching User-Agent based on JA3 index
-        user_agents = [
-            # Chrome on Windows
-            (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/137.0.0.0 Safari/537.36"
-            ),
-            # Firefox on Linux
-            (
-                "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) "
-                "Gecko/20100101 Firefox/128.0"
-            ),
-            # Safari on macOS
-            (
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) "
-                "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-                "Version/17.5 Safari/605.1.15"
-            ),
-            # Edge on Windows
-            (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/137.0.0.0 Safari/537.36 Edg/137.0.0.0"
-            ),
-        ]
-
-        ua = user_agents[self._current_ja3_index % len(user_agents)]
-
-        headers = {
-            "User-Agent": ua,
-            "Accept": (
-                "text/html,application/xhtml+xml,application/xml;q=0.9,"
-                "image/avif,image/webp,image/apng,*/*;q=0.8"
-            ),
-            "Accept-Language": "en-US,en;q=0.9,fa;q=0.8",
-            "Accept-Encoding": "gzip, deflate, br",
-            "DNT": "1",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "none",
-            "Sec-Fetch-User": "?1",
-            "Cache-Control": "max-age=0",
-        }
-
-        return headers
-
-    def _probe_transports(
-        self, transports: List[TransportType]
-    ) -> Dict[TransportType, float]:
-        """
-        Probe available transports and return scores.
-
-        This performs lightweight connectivity tests for each transport
-        type to determine current availability and performance. The
-        probing considers:
-        - DNS resolution of bridge relays
-        - TCP connectivity to bridge ports
-        - TLS handshake success
-        - Response latency
+    def score_bridge(self, bridge: BridgeInfo) -> float:
+        """Score a bridge for selection priority.
 
         Args:
-            transports: List of transport types to probe
+            bridge: Bridge information with metrics.
 
         Returns:
-            Dictionary mapping transport type to score
+            Score from 0-100 (higher is better).
         """
-        scores: Dict[TransportType, float] = {}
-        now = time.time()
+        return self._bridge_scorer.score_bridge(bridge)
 
-        for transport in transports:
-            ts = self._transport_scores.get(transport)
-            if ts and (now - ts.last_probe_time) < self._probe_interval:
-                # Use cached score
-                scores[transport] = ts.score
-                continue
+    def compute_retry_delay(self, attempt: int, is_dpi_error: bool = False) -> float:
+        """Compute adaptive retry delay.
 
-            # Simulate probe result based on censorship level
-            # In a real implementation, this would perform actual
-            # connectivity tests against known bridges
-            base_scores = {
-                TransportType.SNOWFLAKE: 85.0,
-                TransportType.WEBTUNNEL: 80.0,
-                TransportType.MEEK_LITE: 70.0,
-                TransportType.OBFS4: 65.0,
-                TransportType.VANILLA: 30.0,
-            }
+        Args:
+            attempt: Current attempt number (0-indexed).
+            is_dpi_error: Whether the error was DPI-related.
 
-            score = base_scores.get(transport, 50.0)
-
-            # Adjust based on censorship level
-            level_adjustments = {
-                CensorshipLevel.MINIMAL: 0.0,
-                CensorshipLevel.MODERATE: -5.0,
-                CensorshipLevel.SEVERE: -15.0,
-                CensorshipLevel.NIN_SHUTDOWN: -25.0,
-            }
-            score += level_adjustments.get(self._censorship_level, 0.0)
-
-            # Add some randomness to simulate real-world variation
-            score += random.uniform(-5.0, 5.0)
-            score = max(0.0, min(100.0, score))
-
-            scores[transport] = score
-
-            # Update transport score cache
-            self._transport_scores[transport] = TransportScore(
-                transport=transport,
-                score=score,
-                success_rate=score / 100.0,
-                avg_latency_ms=random.uniform(200, 1500),
-                detection_rate=1.0 - (score / 100.0),
-                last_probe_time=now,
-            )
-
-        return scores
-
-    def get_status(self) -> dict:
+        Returns:
+            Delay in seconds before next retry.
         """
-        Get current status of the anti-censorship engine.
+        return self._retry_engine.compute_delay(attempt, is_dpi_error)
 
-        Returns a comprehensive status dictionary with:
-        - Current censorship level
-        - Transport scores
-        - Recent DPI events
-        - Bridge scores summary
+    def should_retry(self, attempt: int, is_dpi_error: bool = False) -> bool:
+        """Determine if another retry should be attempted.
+
+        Args:
+            attempt: Current attempt number.
+            is_dpi_error: Whether the error was DPI-related.
+
+        Returns:
+            True if retry should be attempted.
         """
+        return self._retry_engine.should_retry(attempt, is_dpi_error)
+
+    @property
+    def status(self) -> Dict[str, Any]:
+        """Return current engine status for logging/debugging."""
         return {
-            "censorship_level": self._censorship_level.name,
-            "transport_scores": {
-                t.value: {
-                    "score": ts.score,
-                    "success_rate": ts.success_rate,
-                    "detection_rate": ts.detection_rate,
-                }
-                for t, ts in self._transport_scores.items()
-            },
-            "dpi_events_count": len(self._dpi_events),
-            "bridges_scored": len(self._bridge_scores),
-            "current_ja3_index": self._current_ja3_index,
-            "optimal_transport": self.select_optimal_transport(),
+            "preferred_transport": self._preferred_transport.name,
+            "tls_fingerprint": self._tls_rotator.current_fingerprint["name"],
+            "tls_rotation_count": self._tls_rotator._rotation_count,
+            "dpi_detected": self._retry_engine._dpi_detected,
+            "transport_history": [t.name for t in self._transport_history[-10:]],
         }
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# MODULE-LEVEL CONVENIENCE FUNCTIONS
-# ═══════════════════════════════════════════════════════════════════════════
-
-_engine: Optional[AntiCensorshipEngine] = None
-
-
-def get_anti_censorship_engine() -> AntiCensorshipEngine:
-    """Get or create the singleton AntiCensorshipEngine instance."""
-    global _engine
-    if _engine is None:
-        _engine = AntiCensorshipEngine()
-    return _engine
-
-
-def run_anti_censorship_cycle() -> dict:
-    """
-    Run a complete anti-censorship assessment cycle.
-
-    This performs:
-    1. Censorship level assessment
-    2. Transport probing
-    3. Optimal transport selection
-    4. TLS fingerprint rotation
-    5. Status reporting
-
-    Returns:
-        Status dictionary with assessment results
-    """
-    engine = get_anti_censorship_engine()
-    engine.assess_censorship_level()
-
-    # Probe all transports
-    transports = list(TransportType)
-    engine._probe_transports(transports)
-
-    # Select optimal transport
-    optimal = engine.select_optimal_transport()
-
-    # Rotate fingerprint
-    engine.rotate_tls_fingerprint()
-
-    status = engine.get_status()
-    logger.info(
-        f"[AntiCensorship] Cycle complete: "
-        f"level={status['censorship_level']}, "
-        f"optimal_transport={optimal}"
-    )
-    return status
+# Type alias for convenience
+Any = object  # re-export for type hints used above

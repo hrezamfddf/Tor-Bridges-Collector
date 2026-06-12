@@ -3,41 +3,30 @@ torshield_ai_gateway — v16.0 Ultra-Quantum Edition
 Dynamic multi-provider AI gateway with automatic model selection,
 exponential backoff retry, anti-DPI, smart Iran bypass, and auto-defense.
 
-v16.0 CHANGES (Correction 6: Pre-flight Screening):
-  - Pre-flight screening for broken Cloudflare slots — validates token length,
-    account_id format, and gateway URL BEFORE sending requests
-  - Session-level blacklisting for CF slots that fail all models at runtime
-  - Per-account model cache — remembers which models worked on which account
-  - CF AI Gateway URL duplicate account_id detection
-  - WRONG_RESPONSE false positive validator improvement
-  - All CF secrets now supported up to slot 11 in ALL workflows
-  - Added iran_anti_filter_v3 module (Smart Anti-Filtering + AI Anti-DPI V3)
-    with real-time filter detection, adaptive evasion strategy selection,
-    DPI fingerprint rotation, NIN survival mode, and auto-debugging
+v16.0 CHANGES:
+  - FIX-1: All GitHub Actions updated to Node.js 24 compatible versions
+    (checkout@v5, setup-python@v6, upload-artifact@v6, NODE_NO_WARNINGS)
+  - FIX-2: CF slot pre-flight screening — invalid credentials detected at init
+    time, dead slots silently skipped, HTTP 400 empty body kills slot permanently
+  - FIX-3: Portkey pre-flight key format gate — non-pk- keys skipped entirely,
+    no HTTP 401 attempts for invalid format keys
+  - FIX-4: Health check response validation — flexible TORSHIELD_OK matching,
+    accept substring presence with length cap instead of exact match
+  - FIX-5: ModelSelector live fetch — downgrade 0-model warning to INFO,
+    extract @cf/ canonical names from UUID and @hf/ model objects
+  - FIX-6: Added llama-4-maverick to KNOWN_GOOD_MODELS set
+  - Added anti_censorship.py — AntiCensorshipEngine with DPI detection,
+    TLS fingerprint rotation, bridge scoring, adaptive retry, traffic mimicry
+  - Added auto_debugger.py — AutoDebugger with FixAction enum,
+    automatic diagnosis and fix recommendations for provider errors
+  - Added scripts/package.sh — packaging script for tar.gz distribution
 
 v15.0 CHANGES (preserved):
-  - Added neural_anti_dpi_v3 module (Neural Traffic Morphing for L1 CNN/L2 LSTM
-    evasion, JA3/JA3S Dynamic Rotation Engine, ECH Fallback Router with
-    post-quantum bridge scoring, AntiDPIV3Orchestrator with V2 fallback)
-  - All V2 features preserved — V3 is purely additive
+  - Added neural_anti_dpi_v3 module
   - PYEOF heredoc syntax fixed in all 4 GitHub Actions workflows
   - Auth failure codes (401/403) NEVER retried in _post_json_with_retry
   - Comprehensive audit scripts added (dead code, security, dependencies)
-  - 314 automated tests (126 new: integration, e2e, V3 anti-DPI)
-
-v14.0 CHANGES (preserved):
-  - Added iran_smart_anti_filter_v2 module (AI censorship detection,
-    ISP strategies, temporal analysis, NIN survival, adaptive transport)
-  - Added ai_anti_dpi_iran_v2 module (DPI fingerprinting, JA3/JA4 evasion,
-    SNI manipulation, traffic obfuscation, ML evasion, automated DPI testing)
-  - IranAutoDefense upgraded to v3.0 with V2 engine integration
-  - CF AI Gateway URL now includes account_id in workers-ai path
-  - Cerebras model name corrected (llama3.3-70b)
-  - Portkey model name updated (meta/llama-3.1-70b-instruct)
-  - Cross-slot model skip reduces cascade failures
-  - WRONG_RESPONSE treated as failure, not degraded
-  - Auth errors (400/401/403) not retried in health check
-  - Health check timeout reduced from 20min to ~5min
+  - 314 automated tests
 """
 from .gateway import TorShieldAIGateway, get_gateway
 from .model_selector import (
@@ -75,55 +64,18 @@ except ImportError:
     ECHFallbackRouter = None  # type: ignore[misc,assignment]
     AntiDPIV3Orchestrator = None  # type: ignore[misc,assignment]
 
-# V3 Anti-Filter + Anti-DPI (graceful — import errors are non-fatal)
+# v16.0 modules (graceful — import errors are non-fatal)
 try:
-    from .iran_anti_filter_v3 import (
-        SmartAntiFilterEngine,
-        FilterType,
-        EvasionStrategy,
-        get_anti_filter_engine,
-        run_anti_filter_cycle,
-    )
-except ImportError:
-    SmartAntiFilterEngine = None  # type: ignore[misc,assignment]
-    FilterType = None  # type: ignore[misc,assignment]
-    EvasionStrategy = None  # type: ignore[misc,assignment]
-    get_anti_filter_engine = None  # type: ignore[misc,assignment]
-    run_anti_filter_cycle = None  # type: ignore[misc,assignment]
-
-# Anti-Censorship Engine (graceful — import errors are non-fatal)
-try:
-    from .anti_censorship import (
-        AntiCensorshipEngine,
-        TransportType,
-        DPIAction,
-        CensorshipLevel,
-        IranDPISignatures,
-        get_anti_censorship_engine,
-        run_anti_censorship_cycle,
-    )
+    from .anti_censorship import AntiCensorshipEngine
 except ImportError:
     AntiCensorshipEngine = None  # type: ignore[misc,assignment]
-    TransportType = None  # type: ignore[misc,assignment]
-    DPIAction = None  # type: ignore[misc,assignment]
-    CensorshipLevel = None  # type: ignore[misc,assignment]
-    IranDPISignatures = None  # type: ignore[misc,assignment]
-    get_anti_censorship_engine = None  # type: ignore[misc,assignment]
-    run_anti_censorship_cycle = None  # type: ignore[misc,assignment]
 
-# Auto-Debugger (graceful — import errors are non-fatal)
 try:
-    from .auto_debugger import (
-        AutoDebugger,
-        FixAction,
-        DiagnosticResult,
-        get_auto_debugger,
-    )
+    from .auto_debugger import AutoDebugger, FixAction, DiagnosticResult
 except ImportError:
     AutoDebugger = None  # type: ignore[misc,assignment]
     FixAction = None  # type: ignore[misc,assignment]
     DiagnosticResult = None  # type: ignore[misc,assignment]
-    get_auto_debugger = None  # type: ignore[misc,assignment]
 
 __all__ = [
     "TorShieldAIGateway",
@@ -143,20 +95,8 @@ __all__ = [
     "JA3_JA3S_RotationEngine",
     "ECHFallbackRouter",
     "AntiDPIV3Orchestrator",
-    "SmartAntiFilterEngine",
-    "FilterType",
-    "EvasionStrategy",
-    "get_anti_filter_engine",
-    "run_anti_filter_cycle",
     "AntiCensorshipEngine",
-    "TransportType",
-    "DPIAction",
-    "CensorshipLevel",
-    "IranDPISignatures",
-    "get_anti_censorship_engine",
-    "run_anti_censorship_cycle",
     "AutoDebugger",
     "FixAction",
     "DiagnosticResult",
-    "get_auto_debugger",
 ]

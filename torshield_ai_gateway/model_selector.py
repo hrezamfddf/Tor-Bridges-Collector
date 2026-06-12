@@ -151,6 +151,7 @@ _KNOWN_PAID_ONLY: Set[str] = {
 # next candidate is tried first.
 _KNOWN_GOOD_MODELS: Set[str] = {
     # Tier 1 — Frontier
+    "@cf/meta/llama-4-maverick-17b-128e-instruct-fp8",  # FIX v14.0: added to known-good set
     "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b",
     "@cf/deepseek-ai/deepseek-r1-distill-llama-70b",
     # Tier 2 — Strong
@@ -412,6 +413,12 @@ def _fetch_cf_models(account_id: str, api_token: str) -> List[ModelInfo]:
     if not raw.get("success"):
         raise RuntimeError(f"CF API error: {raw.get('errors', raw)}")
 
+    # FIX v14.0: Debug-level dump of raw API response for diagnostics
+    logger.debug(
+        f"[ModelSelector] CF API raw sample: "
+        f"{str(raw)[:500]}"
+    )
+
     results = raw.get("result", [])
     models: List[ModelInfo] = []
     uuid_count = 0
@@ -448,6 +455,27 @@ def _fetch_cf_models(account_id: str, api_token: str) -> List[ModelInfo]:
         # Filter out UUID-format model IDs — they cannot be used in API URLs
         if _UUID_PATTERN.match(mid):
             uuid_count += 1
+            # FIX v14.0: Try to extract canonical name from UUID model objects
+            if isinstance(item, dict):
+                canonical = item.get('name', '')
+                if canonical and canonical.startswith('@cf/'):
+                    desc = item.get("description", "")
+                    info = ModelInfo(
+                        id=canonical,
+                        name=item.get("name", canonical.split("/")[-1]),
+                        description=desc,
+                        task=task_name,
+                        created_at=item.get("created_at", ""),
+                        param_b=_extract_params(canonical, desc),
+                        ctx_k=_extract_ctx(canonical, desc),
+                        tier=3,
+                    )
+                    info = _enrich_from_offline(info)
+                    models.append(info)
+                    logger.debug(
+                        f"[ModelSelector] Extracted @cf/ name from UUID model: "
+                        f"{canonical}"
+                    )
             continue
 
         # Filter out known paid-only models
@@ -457,11 +485,34 @@ def _fetch_cf_models(account_id: str, api_token: str) -> List[ModelInfo]:
             )
             continue
 
-        # Accept @cf/ and @hf/ prefix models — both are usable on Workers AI.
-        # Non-prefixed or UUID-only IDs are filtered out since they cannot
-        # be used in inference endpoint URLs.
-        if not (mid.startswith("@cf/") or mid.startswith("@hf/")):
-            uuid_count += 1
+        # Filter out @hf/ models (not available on Workers AI free tier)
+        if mid.startswith("@hf/"):
+            logger.debug(
+                f"[ModelSelector] Filtered out @hf/ model (not free tier): {mid}"
+            )
+            # FIX v14.0: Also try to extract canonical name from @hf/ model objects
+            # Some @hf/ models have a 'name' field that contains the @cf/ equivalent
+            if isinstance(item, dict):
+                canonical = item.get('name', '')
+                if canonical and canonical.startswith('@cf/'):
+                    # This is a usable @cf/ canonical name
+                    desc = item.get("description", "")
+                    info = ModelInfo(
+                        id=canonical,
+                        name=item.get("name", canonical.split("/")[-1]),
+                        description=desc,
+                        task=task_name,
+                        created_at=item.get("created_at", ""),
+                        param_b=_extract_params(canonical, desc),
+                        ctx_k=_extract_ctx(canonical, desc),
+                        tier=3,
+                    )
+                    info = _enrich_from_offline(info)
+                    models.append(info)
+                    logger.debug(
+                        f"[ModelSelector] Extracted @cf/ canonical name from @hf/ model: "
+                        f"{canonical}"
+                    )
             continue
 
         desc = item.get("description", "")
@@ -699,9 +750,10 @@ class CloudflareModelSelector:
                 # If live API returns 0 usable models (all UUIDs or wrong task name),
                 # merge with offline list to ensure we always have usable models
                 if not models:
-                    logger.warning(
-                        "[ModelSelector] Live fetch returned 0 usable models — "
-                        "API may have changed. Merging offline models."
+                    logger.info(
+                        "[ModelSelector] Live fetch returned 0 usable models "
+                        "(CF API format may have changed) — "
+                        "using offline model list. Non-critical."
                     )
                     models = _build_offline_models()
             except Exception as exc:

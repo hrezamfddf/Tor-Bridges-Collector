@@ -484,10 +484,7 @@ def check_provider(
         try:
             provider = provider_cls()
             response = provider.chat_complete(
-                messages=[{"role": "user", "content": (
-                    "Reply with ONLY the word TORSHIELD_OK and nothing else. "
-                    "No punctuation, no explanation, no spaces around it."
-                )}],
+                messages=[{"role": "user", "content": "Reply with ONLY this exact string and nothing else, no quotes, no punctuation, no explanation: TORSHIELD_OK"}],
                 max_tokens=20,
                 temperature=0.0,
                 task=task,
@@ -580,11 +577,7 @@ def check_provider(
             )
         elif response_source == "primary":
             # Primary provider responded — check content for expected signal
-            # Use flexible matching: accept if TORSHIELD_OK appears anywhere
-            # in the response (some models add whitespace or newlines)
-            cleaned = response.strip().upper()
-            is_torshield_ok = "TORSHIELD_OK" in cleaned
-            if is_torshield_ok:
+            if _validate_health_response(response):
                 result["status"] = "ok"
                 result["response"] = response[:100]
             else:
@@ -593,15 +586,13 @@ def check_provider(
                 result["response"] = response[:200]
                 result["is_primary"] = False
                 logger.error(
-                    f"  [{provider_name}] WRONG_RESPONSE from primary: "
-                    f"'{response[:80]}...' (expected TORSHIELD_OK) — "
-                    f"TREATED AS FAILURE"
+                    f"  [{provider_name}] WRONG_RESPONSE: "
+                    f"got {repr(response[:120])}, "
+                    f"expected string containing 'TORSHIELD_OK'"
                 )
         else:
             # No metadata from gateway — fall back to content-based heuristics
-            cleaned = response.strip().upper()
-            is_torshield_ok = "TORSHIELD_OK" in cleaned
-            if is_torshield_ok:
+            if _validate_health_response(response):
                 result["status"] = "ok"
                 result["response"] = response[:100]
             else:
@@ -619,8 +610,8 @@ def check_provider(
                     result["is_primary"] = False
                     logger.error(
                         f"  [{provider_name}] WRONG_RESPONSE: "
-                        f"'{response[:80]}...' (expected TORSHIELD_OK) — "
-                        f"TREATED AS FAILURE"
+                        f"got {repr(response[:120])}, "
+                        f"expected string containing 'TORSHIELD_OK'"
                     )
     else:
         # All retries failed
@@ -656,6 +647,22 @@ def check_provider(
             result["error"] = str(last_error)[:300] if last_error else "Unknown error"
 
     return result
+
+
+def _validate_health_response(response_text: str) -> bool:
+    """Accept response if it contains TORSHIELD_OK and is reasonably short.
+
+    FIX v13.0: Some CF model variants add whitespace, punctuation, markdown
+    formatting, or surrounding explanation text, causing exact-match to fail
+    even when the model understood the instruction correctly. This flexible
+    validator checks for substring presence with a length cap to reject
+    verbose/hallucinated responses.
+    """
+    normalized = response_text.upper().strip()
+    return (
+        "TORSHIELD_OK" in normalized
+        and len(response_text.strip()) < 200  # reject verbose responses
+    )
 
 
 def _is_local_engine_response(response: str) -> bool:

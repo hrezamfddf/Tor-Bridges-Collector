@@ -235,7 +235,7 @@ jobs:
 
       - name: Upload quality report
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: quality-report-${{ github.run_id }}
           path: data/quality_report.json
@@ -284,7 +284,7 @@ jobs:
           set -euo pipefail
           cargo build --release 2>&1
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v6
         with:
           name: bridge-probe-bin
           path: |
@@ -360,7 +360,7 @@ jobs:
           set -euo pipefail
           CGO_ENABLED=0 GOOS=linux go build -o probe_scheduler ./cmd/probe_scheduler/
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v6
         with:
           name: go-bins
           path: |
@@ -878,7 +878,7 @@ jobs:
             git push
           fi
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v6
         if: always()
         with:
           name: bridge-intelligence-report
@@ -956,7 +956,7 @@ jobs:
           echo "Archive size: $(du -sh dist/*.tar.gz | cut -f1)"
 
       - name: Upload Final Package
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: TorShield-IR-Final-Package-${{ github.run_id }}
           path: dist/Tor-Bridges-Collector-main-ultra-quantum-vip-vip-super-ultra-vip-ultra-quantum-ultra-vip-ultra-quantum.tar.gz
