@@ -1,0 +1,25 @@
+{
+  "level": 4,
+  "label": "DPI Active (assumed)",
+  "confidence": 0.6,
+  "detected_at": "2026-06-12T10:56:20.610209+00:00",
+  "isp_tier": "unknown",
+  "nin_active": false,
+  "dpi_systems_active": [
+    "sni_inspector",
+    "traffic_classifier",
+    "cert_validator",
+    "ml_analyzer",
+    "ja3_fingerprinter",
+    "entropy_analyzer"
+  ],
+  "recommended_transports": [
+    "snowflake",
+    "webtunnel",
+    "meek_lite",
+    "obfs4_iat2"
+  ],
+  "recommended_pack": "export/iran_pack.txt",
+  "urgency": "high",
+  "auto_switch_enabled": true
+}
