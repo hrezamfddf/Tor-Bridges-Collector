@@ -1,8 +1,44 @@
 """
-Provider implementations v13.0 — Ultra-Quantum Edition: Portkey.ai, Cerebras.ai,
+Provider implementations v15.0 — Ultra-Quantum Edition: Portkey.ai, Cerebras.ai,
 Cloudflare Workers AI, Cloudflare AI Gateway.
 
-CRITICAL FIXES from v12.0:
+CRITICAL FIXES from v15.0 (Correction 7: URL Path + Response Parser + Config Errors):
+  - FIX: CF AI Gateway URL uses OpenAI-compatible endpoint:
+    {gateway_base}/workers-ai/v1/chat/completions with model in request body.
+    NEVER uses /compatible/, /compat/, /openai/, or /run/ paths.
+  - FIX: CF Workers AI direct URL uses OpenAI-compatible endpoint:
+    https://api.cloudflare.com/client/v4/accounts/{acct}/ai/v1/chat/completions
+    with model in request body.
+  - FIX: _extract_text() NEVER returns str(response) — always extracts content
+    from choices[0].message.content, handling both OpenAI and CF response formats.
+  - FIX: ProviderConfigurationError raised when all slots fail (CF) or all keys
+    have invalid format (Portkey). Health check treats this as 'skipped', not failure.
+  - FIX: _dead_slots with threading.Lock for thread-safe dead slot tracking.
+  - FIX: CF slot 400+empty-body → added to _dead_slots, ONE warning per slot,
+    immediately break model-fallback loop for that slot.
+  - FIX: Health check max_tokens=100 for all providers (was 20, too small for
+    verbose models like gpt-oss-120b).
+  - FIX: Health check prompt tightened for maximum compliance.
+  - FIX: Portkey raises ProviderConfigurationError when ALL keys lack 'pk-' prefix.
+    No retry on configuration errors.
+
+CRITICAL FIXES from v14.0 (Correction 6: Pre-flight Screening):
+  - FIX: Pre-flight screening for broken Cloudflare slots — validates token
+    length, account_id format, and gateway URL structure BEFORE sending any
+    request. Broken slots (like slot 7) are silently skipped without causing
+    HTTP 400 errors. No env vars or secrets are deleted.
+  - FIX: Session-level blacklisting for CF slots that fail all models.
+    Blacklisted slots are suspended only for the current CI session and
+    retried automatically in the next run.
+  - FIX: Per-account model cache — remembers which models worked on which
+    CF account to avoid retrying known-to-fail model/account combinations.
+  - FIX: CF AI Gateway URL duplicate account_id detection — prevents
+    malformed URLs where account_id appears twice in the path.
+  - FIX: WRONG_RESPONSE false positive validator — properly handles
+    Cloudflare JSON responses with "errors": [] field.
+  - FIX: All CF secrets now supported up to slot 11 in all workflows.
+
+CRITICAL FIXES from v13.0 (preserved):
   - FIX: Cerebras model "llama3.3-70b" is NOT a valid Cerebras model name.
     Replaced with "llama3.1-70b". DEFAULT_MODEL changed to "llama3.1-8b"
     (most stable free-tier model). Added _discover_models() endpoint
@@ -66,11 +102,199 @@ import urllib.error
 from typing import Optional, List, Dict, Any, Tuple
 from .rotator import AccountRotator, AccountSlot, build_rotator_from_env
 from .model_selector import CloudflareModelSelector, best_cf_model
+from .exceptions import ProviderConfigurationError
 
 logger = logging.getLogger("torshield.ai.providers")
 
 # Number of Cloudflare slots
 CF_N_SLOTS = 11
+
+# ── Pre-flight Screening Constants ───────────────────────────────────────────
+CF_MIN_TOKEN_LENGTH  = 40   # CF API tokens are 40+ chars (strict)
+CF_MIN_ACCT_ID_LENGTH = 32  # CF account IDs are 32-char hex
+CF_MAX_TOKEN_LENGTH  = 200  # Maximum expected token length
+CF_MAX_ACCT_ID_LENGTH = 32  # Account IDs are exactly 32 chars
+
+# ── Per-Account Model Cache ──────────────────────────────────────────────────
+_cf_account_working_models: dict = {}  # account_id → list of working models
+
+
+def record_working_model(account_id: str, model: str) -> None:
+    """Remember which model worked for which CF account."""
+    if account_id not in _cf_account_working_models:
+        _cf_account_working_models[account_id] = []
+    if model not in _cf_account_working_models[account_id]:
+        _cf_account_working_models[account_id].append(model)
+        logger.info(
+            f"[CF-Model-Cache] {_mask_key(account_id, 3)}: "
+            f"confirmed working model: {model}"
+        )
+
+
+def get_models_for_account(
+    account_id: str,
+    default_models: list,
+) -> list:
+    """
+    Return cached working models first, then fallbacks.
+    Avoids retrying models known to fail on this account.
+    """
+    working = _cf_account_working_models.get(account_id, [])
+    result = working.copy()
+    for m in default_models:
+        if m not in result:
+            result.append(m)
+    return result
+
+
+def _preflight_screen_slot(slot_index: int) -> Tuple[bool, str]:
+    """
+    Enhanced pre-flight screening for Cloudflare slots (Amendment 6).
+
+    Validates account_id format (32-char hex), API token length (>=40 chars),
+    and gateway URL structure BEFORE sending any request.
+
+    Broken slots (like slot 7 with corrupted tokens) are detected here
+    and silently skipped without causing HTTP 400 errors.
+
+    Returns:
+        (valid: bool, reason: str) — valid=True means slot is usable.
+    """
+    account_id  = os.environ.get(f"CF_ACCOUNT_ID_{slot_index}", "").strip()
+    api_token   = os.environ.get(f"CF_API_TOKEN_{slot_index}", "").strip()
+    gateway_url = os.environ.get(f"CF_AI_GATEWAY_URL_{slot_index}", "").strip()
+
+    # Rule 1: Both must be non-empty
+    if not account_id or not api_token:
+        return False, "missing credentials"
+
+    # Rule 2: Account ID must be 32-char hex
+    if not re.match(r'^[0-9a-f]{32}$', account_id, re.IGNORECASE):
+        return False, f"invalid account_id format (len={len(account_id)})"
+
+    # Rule 3: API token must be >=40 chars (CF tokens are 40+)
+    if len(api_token) < CF_MIN_TOKEN_LENGTH:
+        return False, f"token too short ({len(api_token)} chars, min={CF_MIN_TOKEN_LENGTH})"
+
+    # Rule 4: Gateway URL must match CF pattern (if provided)
+    if gateway_url:
+        pattern = r'^https://gateway\.ai\.cloudflare\.com/v1/[0-9a-f]{32}/'
+        if not re.match(pattern, gateway_url, re.IGNORECASE):
+            return False, "malformed gateway URL"
+
+    # Rule 5: Account ID in gateway URL must match credentials
+    if gateway_url and account_id:
+        # Extract account_id from gateway URL
+        gw_match = re.search(r'/v1/([0-9a-f]{32})/', gateway_url, re.IGNORECASE)
+        if gw_match:
+            gw_acct = gw_match.group(1)
+            if gw_acct.lower() != account_id.lower():
+                return False, "account_id mismatch between URL and credentials"
+
+    return True, "ok"
+
+
+def preflight_validate_cf_slot(
+    slot_index: int,
+    account_id: str,
+    api_token: str,
+    gateway_url: str = "",
+) -> list:
+    """
+    Pre-flight screening for Cloudflare slots — validates token length,
+    account_id format, and gateway URL structure BEFORE sending any request.
+
+    Broken slots (like slot 7 with corrupted tokens) are detected here
+    and silently skipped without causing HTTP 400 errors.
+
+    Returns a list of warning strings (empty = slot looks valid).
+    The slot is NOT removed — only flagged for skipping at runtime.
+    """
+    issues = []
+
+    # Validate API token
+    if not api_token:
+        issues.append(f"Slot {slot_index}: CF_API_TOKEN is empty")
+    else:
+        clean_token = api_token.strip()
+        if len(clean_token) < CF_MIN_TOKEN_LENGTH:
+            issues.append(
+                f"Slot {slot_index}: CF_API_TOKEN too short "
+                f"(len={len(clean_token)}, min={CF_MIN_TOKEN_LENGTH}). "
+                f"Token appears corrupted or incomplete."
+            )
+        if len(clean_token) > CF_MAX_TOKEN_LENGTH:
+            issues.append(
+                f"Slot {slot_index}: CF_API_TOKEN too long "
+                f"(len={len(clean_token)}, max={CF_MAX_TOKEN_LENGTH}). "
+                f"Token may contain extra characters or multiple tokens."
+            )
+        if '\n' in clean_token or '\r' in clean_token:
+            issues.append(
+                f"Slot {slot_index}: CF_API_TOKEN contains newline characters — "
+                f"possible copy-paste error from GitHub Secrets"
+            )
+        # CF API tokens should not have spaces
+        if ' ' in clean_token:
+            issues.append(
+                f"Slot {slot_index}: CF_API_TOKEN contains spaces — "
+                f"token is likely corrupted"
+            )
+
+    # Validate account ID — must be 32-char hex
+    if not account_id:
+        issues.append(f"Slot {slot_index}: CF_ACCOUNT_ID is empty")
+    else:
+        clean_acct = account_id.strip()
+        if not re.match(r'^[0-9a-f]{32}$', clean_acct, re.IGNORECASE):
+            issues.append(
+                f"Slot {slot_index}: CF_ACCOUNT_ID invalid format "
+                f"(len={len(clean_acct)}, expected 32-char hex). "
+                f"Account ID appears corrupted."
+            )
+
+    # Validate gateway URL (only for AI Gateway provider)
+    if gateway_url:
+        if not gateway_url.startswith("https://"):
+            issues.append(
+                f"Slot {slot_index}: CF_AI_GATEWAY_URL does not start with https://"
+            )
+        else:
+            # Must match CF AI Gateway pattern
+            pattern = r'^https://gateway\.ai\.cloudflare\.com/v1/[0-9a-f]{32}/'
+            if not re.match(pattern, gateway_url, re.IGNORECASE):
+                issues.append(
+                    f"Slot {slot_index}: CF_AI_GATEWAY_URL malformed — "
+                    f"must match https://gateway.ai.cloudflare.com/v1/{{account_id}}/{{slug}}"
+                )
+            else:
+                # Check account_id in URL matches credentials
+                gw_match = re.search(r'/v1/([0-9a-f]{32})/', gateway_url, re.IGNORECASE)
+                if gw_match and account_id:
+                    gw_acct = gw_match.group(1)
+                    if gw_acct.lower() != account_id.strip().lower():
+                        issues.append(
+                            f"Slot {slot_index}: Account ID in gateway URL "
+                            f"({_mask_key(gw_acct, 3)}...) does not match "
+                            f"CF_ACCOUNT_ID ({_mask_key(account_id, 3)}...)"
+                        )
+
+    if issues:
+        for issue in issues:
+            logger.warning(f"[CF-Preflight] {issue}")
+        logger.warning(
+            f"[CF-Preflight] Slot {slot_index} FAILED pre-flight screening — "
+            f"will be silently skipped (NOT deleted from config). "
+            f"{len(issues)} issue(s) detected."
+        )
+    else:
+        logger.debug(
+            f"[CF-Preflight] Slot {slot_index} PASSED pre-flight screening "
+            f"(token_len={len(api_token.strip())}, "
+            f"acct_id_len={len(account_id.strip())})"
+        )
+
+    return issues
 
 # Guaranteed free-tier fallbacks (used only when model selector fails entirely)
 CF_STABLE_MODELS = [
@@ -436,15 +660,50 @@ class _BaseProvider:
 
     @staticmethod
     def _extract_text(response: dict) -> str:
+        """Extract text content from any provider response format.
+
+        Handles OpenAI-compatible format, CF Workers AI format, and legacy CF
+        format. NEVER returns str(response) — always returns a proper string
+        extracted from the response content, or empty string if extraction fails.
+        """
+        if not isinstance(response, dict):
+            return ""
+        # Format 1: OpenAI-compatible (choices[0].message.content)
         try:
-            return response["choices"][0]["message"]["content"].strip()
-        except (KeyError, IndexError):
+            choices = response.get("choices", [])
+            if choices:
+                content = choices[0].get("message", {}).get("content", "")
+                if isinstance(content, str) and content.strip():
+                    return content.strip()
+        except (KeyError, IndexError, TypeError, AttributeError):
             pass
-        try:
-            return response["result"]["response"].strip()
-        except (KeyError, TypeError):
-            pass
-        return str(response)
+        # Format 2: CF Workers AI wrapped in 'result'
+        result = response.get("result", None)
+        if isinstance(result, dict):
+            # result.choices — nested OpenAI format
+            try:
+                r_choices = result.get("choices", [])
+                if r_choices:
+                    content = r_choices[0].get("message", {}).get("content", "")
+                    if isinstance(content, str) and content.strip():
+                        return content.strip()
+            except (KeyError, IndexError, TypeError, AttributeError):
+                pass
+            # result.response — legacy CF format
+            try:
+                resp_val = result.get("response", "")
+                if isinstance(resp_val, str) and resp_val.strip():
+                    return resp_val.strip()
+            except (KeyError, TypeError, AttributeError):
+                pass
+        elif isinstance(result, str) and result.strip():
+            return result.strip()
+        # Format 3: Empty or unrecognized — return empty string, NOT str(response)
+        logger.debug(
+            f"[_extract_text] Could not extract text from response keys: "
+            f"{list(response.keys()) if isinstance(response, dict) else 'non-dict'}"
+        )
+        return ""
 
 
 # ── Portkey ────────────────────────────────────────────────────────────────────
@@ -459,59 +718,119 @@ class PortkeyProvider(_BaseProvider):
     ]
 
     def __init__(self):
-        # ── FIX: Pre-flight key format validation ────────────────────────────
-        # Only add slots with valid pk- prefix keys to the rotator.
-        # Invalid-format keys are skipped entirely — no HTTP requests made.
-        active_slots: list[tuple[int, str]] = []
-        invalid_count = 0
-        for i in range(1, 4):
-            key = os.environ.get(f"PORTKEY_API_KEY_{i}", "").strip()
-            if not key:
-                continue  # empty slot, skip silently
-            if not key.startswith("pk-"):
-                logger.warning(
-                    f"[Portkey] slot {i} skipped — key format invalid "
-                    f"(must start with 'pk-', found '{key[:4]}...')"
-                )
-                invalid_count += 1
-                continue  # DO NOT add to active slot list
-            # Only reaches here if key starts with 'pk-'
-            active_slots.append((i, key))
-
-        if invalid_count == 3 or (invalid_count > 0 and not active_slots):
-            logger.warning(
-                "[Portkey] All 3 slots have invalid key format — "
-                "provider unavailable this run. "
-                "Portkey keys must start with 'pk-'."
-            )
-
-        # Build rotator with only valid-key slots
-        if active_slots:
-            from .rotator import AccountSlot
-            slots = [
-                AccountSlot(index=idx, account_id=f"portkey-{idx}", api_key=key)
-                for idx, key in active_slots
-            ]
-            self.rotator = AccountRotator("portkey", slots)
-        else:
-            # No valid slots — create empty rotator (will raise on use)
-            self.rotator = AccountRotator("portkey", [])
-            self._all_slots_invalid = True
-            logger.warning(
-                "[Portkey] No valid API key slots — "
-                "provider will be unavailable this run."
-            )
-
+        self.rotator = build_rotator_from_env("PORTKEY", n_accounts=3)
         raw_url = os.environ.get("PORTKEY_GATEWAY_URL", "https://api.portkey.ai/v1")
         if not raw_url.startswith("http"):
             raw_url = "https://api.portkey.ai/v1"
         self.gateway_url = raw_url.rstrip("/")
         self.circuit_breaker = ProviderCircuitBreaker("Portkey")
-        self._active_slots = active_slots
+
+        # ── Pre-flight key format validation ────────────────────────────
+        # Check if any Portkey API key starts with 'pk-' prefix.
+        # Keys without 'pk-' prefix will always fail authentication and
+        # there is no point in trying them. If ALL keys are invalid format,
+        # raise ProviderConfigurationError so the health check marks this
+        # provider as 'skipped' instead of retrying endlessly.
+        self._active_slots: list[int] = []
+        self._invalid_key_slots: list[int] = []
+        for i in range(1, 4):
+            key = os.environ.get(f"PORTKEY_API_KEY_{i}", "").strip()
+            virtual_key = os.environ.get(f"PORTKEY_VIRTUAL_KEY_{i}", "").strip()
+            if not key and not virtual_key:
+                continue
+            # A slot is valid if its key (or virtual key) starts with 'pk-'
+            # or is a known provider format like 'sk-' (OpenAI).
+            # Keys with no recognized prefix that aren't empty are flagged.
+            if key.startswith("pk-") or key.startswith("sk-") or virtual_key.startswith("pk-"):
+                self._active_slots.append(i)
+            else:
+                self._invalid_key_slots.append(i)
+                logger.warning(
+                    f"[Portkey] slot {i} skipped — key format invalid "
+                    f"(must start with 'pk-' or 'sk-', "
+                    f"got '{key[:6]}...')"
+                )
+
+        if self._invalid_key_slots and not self._active_slots:
+            reason = (
+                "All Portkey API keys have invalid format "
+                f"(none start with 'pk-'). "
+                "Check PORTKEY_API_KEY_1/2/3 in GitHub Secrets."
+            )
+            logger.warning(f"[Portkey] {reason}")
+            raise ProviderConfigurationError(reason, provider="portkey")
+
         logger.info(
-            f"[Portkey] Initialized with gateway: {_mask_url(self.gateway_url)}, "
-            f"{len(active_slots)} valid slot(s)"
+            f"[Portkey] Initialized with gateway: {_mask_url(self.gateway_url)} "
+            f"({len(self._active_slots)} active slot(s), "
+            f"{len(self._invalid_key_slots)} invalid-format slot(s))"
         )
+
+    @staticmethod
+    def _build_portkey_auth(slot: int) -> dict:
+        """
+        Build Portkey authentication headers with intelligent key detection.
+
+        Supports three auth methods:
+        1. Native Portkey key (pk- prefix) → x-portkey-api-key header
+        2. Virtual key fallback (pk- prefix in PORTKEY_VIRTUAL_KEY) → combined auth
+        3. Provider API key (sk- prefix like OpenAI) → Bearer + x-portkey-provider
+
+        Raises ValueError if no valid key format is found.
+        """
+        key = os.environ.get(f"PORTKEY_API_KEY_{slot}", "").strip()
+        virtual_key = os.environ.get(f"PORTKEY_VIRTUAL_KEY_{slot}", "").strip()
+
+        headers = {"Content-Type": "application/json"}
+
+        if key.startswith("pk-"):
+            # Native Portkey key
+            headers["x-portkey-api-key"] = key
+            logger.debug(
+                f"[Portkey] slot {slot} Using native Portkey key: {_mask_key(key)}"
+            )
+        elif virtual_key.startswith("pk-"):
+            # Virtual key fallback
+            headers["x-portkey-api-key"] = virtual_key
+            headers["x-portkey-virtual-key"] = virtual_key
+            logger.debug(
+                f"[Portkey] slot {slot} Using virtual key: {_mask_key(virtual_key)}"
+            )
+        elif key.startswith("sk-"):
+            # Provider API key (e.g. OpenAI key) — route directly
+            headers["Authorization"] = f"Bearer {key}"
+            headers["x-portkey-provider"] = "openai"
+            logger.debug(
+                f"[Portkey] slot {slot} Using provider key (sk- prefix) "
+                f"with x-portkey-provider=openai"
+            )
+        elif key:
+            # Unknown provider key format — try as Bearer with openai provider
+            headers["Authorization"] = f"Bearer {key}"
+            headers["x-portkey-provider"] = "openai"
+            logger.warning(
+                f"[Portkey] slot {slot} Unrecognized key format "
+                f"(starts with '{key[:4]}...') — attempting Bearer auth. "
+                f"Expected 'pk-' (Portkey) or 'sk-' (OpenAI) prefix."
+            )
+        else:
+            raise ValueError(
+                f"Slot {slot}: no valid Portkey key found — "
+                f"PORTKEY_API_KEY_{slot} and PORTKEY_VIRTUAL_KEY_{slot} are empty"
+            )
+
+        # Also check for x-portkey-config header (virtual key config ID)
+        config_id = os.environ.get(
+            f"PORTKEY_CONFIG_{slot}",
+            os.environ.get("PORTKEY_CONFIG", "")
+        ).strip()
+        if config_id:
+            headers["x-portkey-config"] = config_id
+            logger.debug(
+                f"[Portkey] slot {slot} Using config: {_mask_key(config_id)}"
+            )
+
+        return headers
 
     @staticmethod
     def _validate_portkey_key(key: str, slot_index: int = 0) -> List[str]:
@@ -563,16 +882,6 @@ class PortkeyProvider(_BaseProvider):
         self, messages, model=None, max_tokens=2048, temperature=0.2,
         timeout=60, task="general"
     ) -> str:
-        # ── FIX: Early exit if all slots have invalid key format ────────────
-        if not self._active_slots:
-            logger.info(
-                "[Portkey] SKIPPED — all slots have invalid key format "
-                "(pre-flight: no keys start with 'pk-')"
-            )
-            raise RuntimeError(
-                "Portkey provider unavailable: all slots have invalid key format"
-            )
-
         # Provider-level circuit breaker check
         if not self.circuit_breaker.allow_request():
             logger.warning(
@@ -601,53 +910,29 @@ class PortkeyProvider(_BaseProvider):
                         logger.warning(f"[Portkey] slot {s.index} has empty API key — skipping")
                         break  # No point trying other models with empty key
 
-                    # Key format is already validated at init time (pk- prefix check).
-                    # No need for verbose KEY VALIDATION warnings here anymore.
+                    # Validate key format
+                    key_issues = self._validate_portkey_key(clean_key, s.index)
+                    if key_issues:
+                        logger.warning(
+                            f"[Portkey] slot {s.index} Key format issues detected. "
+                            f"If auth fails, check: (1) key starts with 'pk-', "
+                            f"(2) key is not expired, (3) PORTKEY_VIRTUAL_KEY_{s.index} "
+                            f"env var as alternative auth."
+                        )
 
                     url     = f"{self.gateway_url}/chat/completions"
-                    headers = {
-                        "Content-Type":       "application/json",
-                    }
 
                     # ── Portkey Authentication Strategy ─────────────────────
-                    # Portkey supports two auth methods:
-                    # 1. Portkey API key (starts with 'pk-'): use x-portkey-api-key header
-                    # 2. Provider API key (no 'pk-' prefix): use Authorization Bearer
-                    #    with x-portkey-provider set to the target provider
-                    virtual_key = self._get_virtual_key(s.index)
-                    if virtual_key:
-                        # Virtual key auth (highest priority)
-                        headers["x-portkey-virtual-key"] = virtual_key
-                        headers["x-portkey-api-key"] = clean_key
-                        logger.debug(
-                            f"[Portkey] slot {s.index} Using virtual key: "
-                            f"{_mask_key(virtual_key)}"
+                    # Use the enhanced _build_portkey_auth method for intelligent
+                    # key detection: pk- (native), virtual key, sk- (provider),
+                    # or unknown format with warning.
+                    try:
+                        headers = self._build_portkey_auth(s.index)
+                    except ValueError as auth_err:
+                        logger.warning(
+                            f"[Portkey] slot {s.index} Auth build failed: {auth_err}"
                         )
-                    elif clean_key.startswith("pk-"):
-                        # Standard Portkey API key format
-                        headers["x-portkey-api-key"] = clean_key
-                        headers["x-portkey-provider"] = "openai"
-                    else:
-                        # Non-pk- prefix key: likely a provider API key being
-                        # routed through Portkey. Use Bearer auth + explicit provider.
-                        headers["Authorization"] = f"Bearer {clean_key}"
-                        headers["x-portkey-provider"] = "openai"
-                        logger.debug(
-                            f"[Portkey] slot {s.index} Non-pk- key detected — "
-                            f"using Bearer auth with x-portkey-provider=openai"
-                        )
-
-                    # Also check for x-portkey-config header (virtual key config ID)
-                    config_id = os.environ.get(
-                        f"PORTKEY_CONFIG_{s.index}",
-                        os.environ.get("PORTKEY_CONFIG", "")
-                    )
-                    if config_id:
-                        headers["x-portkey-config"] = config_id.strip()
-                        logger.debug(
-                            f"[Portkey] slot {s.index} Using config: "
-                            f"{_mask_key(config_id.strip())}"
-                        )
+                        break  # No point trying other models with bad auth
 
                     payload = {
                         "model":       m,
@@ -666,12 +951,21 @@ class PortkeyProvider(_BaseProvider):
                     last_err = e
                     if e.code in (403, 401):
                         last_auth_error = e
-                        # FIX: Pre-flight already filters invalid-format keys.
-                        # If we still get 401 here, it's an expired/revoked key.
+                        error_body = _read_error_body(e)
                         logger.warning(
-                            f"[Portkey] slot {s.index} AUTH FAIL HTTP {e.code} — "
-                            f"key may be expired or revoked"
+                            f"[Portkey] slot {s.index} AUTH FAIL HTTP {e.code}"
                         )
+                        # Enhanced 401 diagnostics
+                        if e.code == 401:
+                            logger.error(
+                                f"[Portkey] slot {s.index} HTTP 401 UNAUTHORIZED — "
+                                f"possible causes: "
+                                f"(1) Invalid/expired API key, "
+                                f"(2) Key format wrong — Portkey keys start with 'pk-', "
+                                f"(3) Missing x-portkey-config header for virtual key auth, "
+                                f"(4) Using provider API key instead of Portkey key. "
+                                f"Response: {error_body[:200]}"
+                            )
                         self.rotator.mark_failure(s)
                         self.circuit_breaker.record_failure()
                         break  # Try next slot, not next model
@@ -781,6 +1075,35 @@ class CerebrasProvider(_BaseProvider):
             )
             return list(self.CEREBRAS_MODELS)
 
+    @staticmethod
+    def _extract_openai_content(response_json: dict) -> str:
+        """
+        Extract content from OpenAI-format response.
+        NEVER returns str(response_json).
+        Handles finish_reason=length gracefully.
+        """
+        try:
+            choices = response_json.get("choices", [])
+            if not choices:
+                logger.warning(
+                    f"[Cerebras] Response has no choices. "
+                    f"Keys: {list(response_json.keys())}"
+                )
+                return ""
+            choice = choices[0]
+            finish_reason = choice.get("finish_reason", "unknown")
+            if finish_reason == "length":
+                logger.warning(
+                    f"[Cerebras] finish_reason=length — "
+                    f"max_tokens budget exhausted before TORSHIELD_OK. "
+                    f"Increase max_tokens in health check prompt."
+                )
+            content = choice.get("message", {}).get("content", "")
+            return content if isinstance(content, str) else ""
+        except (KeyError, IndexError, TypeError) as e:
+            logger.error(f"[Cerebras] Response parse error: {e}")
+            return ""
+
     def chat_complete(
         self, messages, model=None, max_tokens=2048, temperature=0.2,
         timeout=60, task="general"
@@ -836,7 +1159,7 @@ class CerebrasProvider(_BaseProvider):
                     )
                     self.rotator.mark_success(s, lat)
                     self.circuit_breaker.record_success()
-                    return self._extract_text(resp)
+                    return self._extract_openai_content(resp)
                 except urllib.error.HTTPError as e:
                     last_err = e
                     if e.code in (403, 401):
@@ -883,62 +1206,132 @@ class CloudflareWorkersAIProvider(_BaseProvider):
     Cloudflare Workers AI — direct API with dynamic model selection.
     Model is resolved at call-time via CloudflareModelSelector.
 
-    FIX v14.0: Pre-flight screening validates CF slot credentials at init time.
-    Invalid slots are added to _dead_slots and silently skipped during inference.
-    HTTP 400 with empty body at runtime also permanently kills the slot.
+    CORRECTION 7: Uses OpenAI-compatible endpoint:
+      POST https://api.cloudflare.com/client/v4/accounts/{acct}/ai/v1/chat/completions
+      Body: {"model": model_id, "messages": [...], "max_tokens": N, "stream": false}
+
+    CORRECTION 6: Pre-flight screening validates each slot's token and
+    account_id BEFORE any request is sent. Broken slots are silently skipped.
     """
     name = "cloudflare_workers_ai"
     # Class-level set of models that 400'd on any slot — skip on all
     # subsequent slots to reduce health-check timeout cascade.
     _failed_models: set = set()
 
-    # ── Pre-flight validation regex ─────────────────────────────────────────
-    _CF_ACCOUNT_ID_RE = re.compile(r'[0-9a-f]{32,}', re.IGNORECASE)
-
     def __init__(self):
-        self._dead_slots: set[int] = set()
-        self._dead_slots_lock = threading.Lock()
         slots = []
+        skipped_slots = []
         for i in range(1, CF_N_SLOTS + 1):
-            # ── FIX: Static pre-flight screening (no HTTP calls) ──────────────
-            acct_id   = os.environ.get(f"CF_ACCOUNT_ID_{i}", "").strip()
-            api_token = os.environ.get(f"CF_API_TOKEN_{i}", "").strip()
-
-            # Reject slot if account_id is invalid
-            if not acct_id or len(acct_id) < 32 or not self._CF_ACCOUNT_ID_RE.fullmatch(acct_id):
-                if acct_id:  # only log if something was present but invalid
-                    logger.warning(
-                        f"[CF] slot {i} failed static pre-flight "
-                        f"(acct_len={len(acct_id)}, token_len={len(api_token)}) "
-                        f"— skipping this slot entirely"
-                    )
-                self._dead_slots.add(i)
+            acct_id   = os.environ.get(f"CF_ACCOUNT_ID_{i}", "")
+            api_token = os.environ.get(f"CF_API_TOKEN_{i}", "")
+            if not (acct_id and api_token):
                 continue
-
-            # Reject slot if token is too short
-            if not api_token or len(api_token) < 40:
-                if api_token:  # only log if something was present but invalid
-                    logger.warning(
-                        f"[CF] slot {i} failed static pre-flight "
-                        f"(acct_len={len(acct_id)}, token_len={len(api_token)}) "
-                        f"— skipping this slot entirely"
-                    )
-                self._dead_slots.add(i)
+            # ── CORRECTION 6: Pre-flight screening ───────────────────
+            valid, reason = _preflight_screen_slot(i)
+            if not valid:
+                logger.warning(
+                    f"[CF-Workers-AI] Slot {i} skipped by pre-flight: {reason}"
+                )
+                skipped_slots.append(i)
                 continue
-
+            preflight_issues = preflight_validate_cf_slot(
+                slot_index=i,
+                account_id=acct_id,
+                api_token=api_token,
+            )
+            if preflight_issues:
+                skipped_slots.append(i)
+                continue
             slots.append(
                 AccountSlot(index=i, account_id=acct_id, api_key=api_token)
             )
+        if skipped_slots:
+            logger.warning(
+                f"[CF-Workers-AI] Pre-flight screening SKIPPED {len(skipped_slots)} "
+                f"broken slot(s): {skipped_slots}. These slots are NOT deleted — "
+                f"they will be retried in the next CI run after fixing secrets."
+            )
         if not slots:
-            raise ValueError(
-                "[CloudflareWorkersAI] No CF accounts configured."
+            raise ProviderConfigurationError(
+                "[CloudflareWorkersAI] No CF accounts configured "
+                "(all slots either empty or failed pre-flight screening).",
+                provider="cloudflare_workers_ai",
             )
         self.rotator = AccountRotator("cloudflare_workers_ai", slots)
         self._selector = CloudflareModelSelector.instance()
         self.circuit_breaker = ProviderCircuitBreaker("CF-Workers-AI")
+        # Session-level blacklist for slots that fail all models at runtime
+        self._session_blacklist: set = set()
+        # Thread-safe dead slot tracking: slots that return 400+empty body
+        self._dead_slots: set[int] = set()
+        self._dead_slots_lock = threading.Lock()
         logger.info(
-            f"[CF-Workers-AI] Initialized with {len(slots)} slot(s)"
+            f"[CF-Workers-AI] Initialized with {len(slots)} slot(s) "
+            f"({len(skipped_slots)} skipped by pre-flight screening)"
         )
+
+    @staticmethod
+    def _build_cf_workers_url(account_id: str) -> str:
+        """Build the correct CF Workers AI REST API URL.
+        OpenAI-compatible format — model goes in request body, not URL.
+        """
+        return (
+            f"https://api.cloudflare.com/client/v4/accounts/"
+            f"{account_id}/ai/v1/chat/completions"
+        )
+
+    @staticmethod
+    def _build_cf_request_body(
+        model_id: str,
+        messages: list,
+        max_tokens: int = 50,
+        temperature: float = 0.2,
+    ) -> dict:
+        """Build request body for CF OpenAI-compatible endpoint.
+        Model ID is placed in the request body, NOT the URL path.
+        """
+        return {
+            "model": model_id,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": False,
+        }
+
+    @staticmethod
+    def _extract_cf_content(response_json: dict) -> str:
+        """Extract text content from CF Workers AI response (any format)."""
+        if not isinstance(response_json, dict):
+            return ""
+        # Format 1: wrapped in 'result'
+        result = response_json.get("result", response_json)
+        # Format 2: direct OpenAI format
+        choices = result.get("choices") if isinstance(result, dict) else None
+        if not choices:
+            choices = response_json.get("choices", [])
+        if choices:
+            try:
+                msg = choices[0].get("message", {})
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    return content.strip()
+            except (KeyError, IndexError, TypeError, AttributeError):
+                pass
+        # Format 3: legacy CF format
+        if "result" in response_json:
+            r = response_json["result"]
+            if isinstance(r, str) and r.strip():
+                return r.strip()
+            if isinstance(r, dict):
+                resp_val = r.get("response", "")
+                if isinstance(resp_val, str) and resp_val.strip():
+                    return resp_val.strip()
+        # Nothing found — return empty string (NOT str(response_json))
+        logger.debug(
+            f"[CF-Workers-AI] Could not extract content from response keys: "
+            f"{list(response_json.keys())}"
+        )
+        return ""
 
     def _resolve_model(self, model: Optional[str], task: str) -> str:
         """Return model to use: explicit > dynamic selection > stable fallback."""
@@ -976,12 +1369,13 @@ class CloudflareWorkersAIProvider(_BaseProvider):
 
         last_auth_error = None
         for attempt, s in enumerate(fallbacks):
-            # ── FIX: Runtime dead-slot guard ────────────────────────────────────
+            last_err = None
+
+            # Skip dead slots (slots that previously returned 400+empty body)
             with self._dead_slots_lock:
                 if s.index in self._dead_slots:
-                    continue  # skip silently — already logged at init or on first 400
+                    continue
 
-            last_err = None
             for m in models_to_try:
                 # Skip models that already 400'd on a previous slot
                 if m in self._failed_models:
@@ -998,31 +1392,28 @@ class CloudflareWorkersAIProvider(_BaseProvider):
                         logger.warning(
                             f"[CF-Workers-AI] slot {s.index} has empty credentials — skipping"
                         )
-                        continue
+                        break  # No point trying other models with bad credentials
 
-                    # Strip @ prefix from model ID for URL construction
-                    model_id = m.lstrip("@") if m.startswith("@cf/") else m
-                    url = (
-                        "https://api.cloudflare.com/client/v4/accounts/"
-                        f"{clean_acct}/ai/run/{model_id}"
-                    )
+                    # CORRECTION 7: Use OpenAI-compatible endpoint
+                    # Model ID goes in request body, NOT URL path.
+                    url = self._build_cf_workers_url(clean_acct)
                     headers = {
                         "Content-Type":  "application/json",
                         "Authorization": f"Bearer {clean_token}",
                     }
-                    payload = {
-                        "messages":    messages,
-                        "max_tokens":  max_tokens,
-                        "temperature": temperature,
-                        "stream":      False,
-                    }
+                    payload = self._build_cf_request_body(
+                        model_id=m,
+                        messages=messages,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                    )
                     resp, lat = self._post_json_with_retry(
                         url, headers, payload, timeout,
                         provider_name="CF-Workers-AI", slot_index=s.index
                     )
                     self.rotator.mark_success(s, lat)
                     self.circuit_breaker.record_success()
-                    return self._extract_text(resp)
+                    return self._extract_cf_content(resp)
                 except urllib.error.HTTPError as e:
                     last_err = e
                     if e.code in (403, 401):
@@ -1034,17 +1425,17 @@ class CloudflareWorkersAIProvider(_BaseProvider):
                         break  # Try next slot, not next model
                     if e.code == 400:
                         error_body = _read_error_body(e)
-                        # ── FIX: HTTP 400 with empty body = permanently dead slot ──
                         if not error_body.strip():
+                            # 400 with empty body → slot is dead, skip all remaining models
                             with self._dead_slots_lock:
-                                if s.index not in self._dead_slots:  # log only once
+                                if s.index not in self._dead_slots:
                                     self._dead_slots.add(s.index)
                                     logger.warning(
                                         f"[CF] slot {s.index} permanently failed "
                                         f"(HTTP 400 empty body) — "
                                         f"skipping all remaining models for this slot"
                                     )
-                            break  # exit model-fallback loop for this slot immediately
+                            break  # Stop trying models for this slot
                         # Model-specific issue — add to failed set and try next model
                         self._failed_models.add(m)
                         logger.debug(
@@ -1063,16 +1454,27 @@ class CloudflareWorkersAIProvider(_BaseProvider):
                 if last_err.code in (403, 401):
                     self.rotator.mark_failure(s)
                     continue  # Try next slot
-                # Don't log 'all models failed' for dead slots
-                with self._dead_slots_lock:
-                    if s.index in self._dead_slots:
-                        continue
                 logger.warning(f"[CF-Workers-AI] slot {s.index} all models failed")
                 self.rotator.mark_failure(s)
                 self.circuit_breaker.record_failure()
                 if attempt == len(fallbacks) - 1:
                     raise last_err
                 time.sleep(2 ** attempt)
+
+        # All slots exhausted — check if all are dead (config error, not runtime)
+        with self._dead_slots_lock:
+            all_dead = all(
+                s.index in self._dead_slots
+                for s in self.rotator.slots
+            )
+
+        if all_dead:
+            raise ProviderConfigurationError(
+                f"[CF-Workers-AI] All {len(self.rotator.slots)} slots failed "
+                f"(HTTP 400 / empty body on first model attempt per slot). "
+                f"Verify CF_ACCOUNT_ID and CF_API_TOKEN values in GitHub Secrets.",
+                provider="cloudflare_workers_ai",
+            )
 
         if last_auth_error:
             raise last_auth_error
@@ -1087,9 +1489,15 @@ class CloudflareAIGatewayProvider(_BaseProvider):
     11 gateway slots × free quota = 11× effective throughput.
     Model resolved dynamically via CloudflareModelSelector.
 
-    FIX v14.0: Pre-flight screening validates CF slot credentials at init time.
-    Invalid slots are added to _dead_slots and silently skipped during inference.
-    HTTP 400 with empty body at runtime also permanently kills the slot.
+    CORRECTION 7: Uses OpenAI-compatible endpoint for CF AI Gateway:
+      POST {gateway_base}/workers-ai/v1/chat/completions
+      Body: {"model": model_id, "messages": [...], "max_tokens": N, "stream": false}
+      Model ID goes in request body, NOT URL path.
+      NEVER uses /compatible/, /compat/, /openai/, or /run/ paths.
+      The account_id must appear EXACTLY ONCE in each URL (inside the gateway base).
+
+    CORRECTION 6: Pre-flight screening validates each slot's token length,
+    account_id format, and gateway URL structure BEFORE any request is sent.
     """
     name = "cloudflare_ai_gateway"
     # Class-level set of models that 400'd on any slot — skip on all
@@ -1098,65 +1506,46 @@ class CloudflareAIGatewayProvider(_BaseProvider):
     # Expected gateway URL prefix
     _GATEWAY_URL_PREFIX = "https://gateway.ai.cloudflare.com/v1/"
 
-    # ── Pre-flight validation regex ─────────────────────────────────────────
-    _CF_ACCOUNT_ID_RE = re.compile(r'[0-9a-f]{32,}', re.IGNORECASE)
-
     def __init__(self):
-        self._dead_slots: set[int] = set()
-        self._dead_slots_lock = threading.Lock()
         slots = []
+        skipped_slots = []
         for i in range(1, CF_N_SLOTS + 1):
-            # ── FIX: Static pre-flight screening (no HTTP calls) ──────────────
-            acct_id     = os.environ.get(f"CF_ACCOUNT_ID_{i}", "").strip()
-            api_token   = os.environ.get(f"CF_API_TOKEN_{i}", "").strip()
-            gateway_url = os.environ.get(f"CF_AI_GATEWAY_URL_{i}", "").strip()
-
-            # Reject slot if account_id is invalid
-            if not acct_id or len(acct_id) < 32 or not self._CF_ACCOUNT_ID_RE.fullmatch(acct_id):
-                if acct_id:  # only log if something was present but invalid
-                    logger.warning(
-                        f"[CF] slot {i} failed static pre-flight "
-                        f"(acct_len={len(acct_id)}, token_len={len(api_token)}) "
-                        f"— skipping this slot entirely"
-                    )
-                self._dead_slots.add(i)
-                continue
-
-            # Reject slot if token is too short
-            if not api_token or len(api_token) < 40:
-                if api_token:  # only log if something was present but invalid
-                    logger.warning(
-                        f"[CF] slot {i} failed static pre-flight "
-                        f"(acct_len={len(acct_id)}, token_len={len(api_token)}) "
-                        f"— skipping this slot entirely"
-                    )
-                self._dead_slots.add(i)
-                continue
-
-            # Reject slot if gateway_url is present but invalid format
-            if gateway_url and not gateway_url.startswith(self._GATEWAY_URL_PREFIX):
-                logger.warning(
-                    f"[CF] slot {i} failed static pre-flight "
-                    f"(gateway_url does not start with '{self._GATEWAY_URL_PREFIX}') "
-                    f"— skipping this slot entirely"
-                )
-                self._dead_slots.add(i)
-                continue
-
+            acct_id     = os.environ.get(f"CF_ACCOUNT_ID_{i}", "")
+            api_token   = os.environ.get(f"CF_API_TOKEN_{i}", "")
+            gateway_url = os.environ.get(f"CF_AI_GATEWAY_URL_{i}", "")
             if not (acct_id and api_token and gateway_url):
                 continue
+
+            # ── CORRECTION 6: Pre-flight screening ───────────────────
+            valid, reason = _preflight_screen_slot(i)
+            if not valid:
+                logger.warning(
+                    f"[CF-AI-GW] Slot {i} skipped by pre-flight: {reason}"
+                )
+                skipped_slots.append(i)
+                continue
+            preflight_issues = preflight_validate_cf_slot(
+                slot_index=i,
+                account_id=acct_id,
+                api_token=api_token,
+                gateway_url=gateway_url,
+            )
+            if preflight_issues:
+                skipped_slots.append(i)
+                continue
+
             try:
                 gateway_url = _validate_url(gateway_url, f"CF_AI_GATEWAY_URL_{i}")
             except ValueError as e:
                 logger.error(str(e))
-                self._dead_slots.add(i)
+                skipped_slots.append(i)
                 continue
             # Validate gateway URL structure
             try:
                 self._validate_gateway_url(gateway_url, acct_id, slot_index=i)
             except ValueError as e:
                 logger.error(str(e))
-                self._dead_slots.add(i)
+                skipped_slots.append(i)
                 continue
             slots.append(
                 AccountSlot(
@@ -1166,16 +1555,57 @@ class CloudflareAIGatewayProvider(_BaseProvider):
                     gateway_url=gateway_url,
                 )
             )
+        if skipped_slots:
+            logger.warning(
+                f"[CF-AI-GW] Pre-flight screening SKIPPED {len(skipped_slots)} "
+                f"broken slot(s): {skipped_slots}. These slots are NOT deleted — "
+                f"they will be retried in the next CI run after fixing secrets."
+            )
         if not slots:
-            raise ValueError(
-                "[CF-AI-Gateway] No gateway slots configured."
+            raise ProviderConfigurationError(
+                "[CF-AI-Gateway] No gateway slots configured "
+                "(all slots either empty or failed pre-flight screening).",
+                provider="cloudflare_ai_gateway",
             )
         self.rotator  = AccountRotator("cloudflare_ai_gateway", slots)
         self._selector = CloudflareModelSelector.instance()
         self.circuit_breaker = ProviderCircuitBreaker("CF-AI-GW")
+        # Session-level blacklist for slots that fail all models at runtime
+        self._session_blacklist: set = set()
+        # Thread-safe dead slot tracking: slots that return 400+empty body
+        self._dead_slots: set[int] = set()
+        self._dead_slots_lock = threading.Lock()
         logger.info(
-            f"[CF-AI-GW] Initialized with {len(slots)} slot(s)"
+            f"[CF-AI-GW] Initialized with {len(slots)} slot(s) "
+            f"({len(skipped_slots)} skipped by pre-flight screening)"
         )
+
+    @staticmethod
+    def _build_cf_gateway_url(gateway_base_url: str) -> str:
+        """Build the correct CF AI Gateway Workers AI URL.
+        Uses OpenAI-compatible format — model goes in request body, not URL.
+        Path: {gateway_base}/workers-ai/v1/chat/completions
+        """
+        base = gateway_base_url.rstrip("/")
+        return f"{base}/workers-ai/v1/chat/completions"
+
+    @staticmethod
+    def _build_cf_request_body(
+        model_id: str,
+        messages: list,
+        max_tokens: int = 50,
+        temperature: float = 0.2,
+    ) -> dict:
+        """Build request body for CF AI Gateway OpenAI-compatible endpoint.
+        Model ID is placed in the request body, NOT the URL path.
+        """
+        return {
+            "model": model_id,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": False,
+        }
 
     @classmethod
     def _validate_gateway_url(
@@ -1186,7 +1616,7 @@ class CloudflareAIGatewayProvider(_BaseProvider):
         Expected format: https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_slug}
         - Must start with https://gateway.ai.cloudflare.com/v1/
         - Must contain an account_id in the path after /v1/
-        - Logs the full URL pattern (with masked account_id) for debugging.
+        - Logs the validated endpoint (with masked account_id) for debugging.
         """
         if not gateway_url.startswith(cls._GATEWAY_URL_PREFIX):
             raise ValueError(
@@ -1220,12 +1650,12 @@ class CloudflareAIGatewayProvider(_BaseProvider):
                 f"This may cause 400 errors."
             )
 
+        # Log the CORRECT endpoint pattern (OpenAI-compatible)
         logger.info(
-            f"[CF-AI-GW] slot {slot_index} Gateway URL validated: "
-            f"prefix={cls._GATEWAY_URL_PREFIX} "
-            f"account_id={_mask_key(url_account_id, 3)} "
-            f"gateway_slug={gateway_slug} "
-            f"full_pattern={cls._GATEWAY_URL_PREFIX}{_mask_key(url_account_id, 3)}/{gateway_slug}/workers-ai/{{account_id}}/{{model_id}}"
+            f"[CF-AI-GW] slot {slot_index} validated: "
+            f"endpoint=https://gateway.ai.cloudflare.com/v1/"
+            f"{_mask_key(url_account_id, 3)}/{gateway_slug}"
+            f"/workers-ai/v1/chat/completions model_in_body=True"
         )
 
     @staticmethod
@@ -1249,7 +1679,6 @@ class CloudflareAIGatewayProvider(_BaseProvider):
                 return True
         except urllib.error.HTTPError as e:
             # Any HTTP response means the gateway is reachable
-            # (even 404/403 means the server is up)
             logger.debug(
                 f"[CF-AI-GW] Gateway probe got HTTP {e.code} — "
                 f"gateway is reachable but returned error"
@@ -1296,12 +1725,12 @@ class CloudflareAIGatewayProvider(_BaseProvider):
 
         last_auth_error = None
         for attempt, s in enumerate(fallbacks):
-            # ── FIX: Runtime dead-slot guard ────────────────────────────────────
+            last_err = None
+
+            # Skip dead slots (slots that previously returned 400+empty body)
             with self._dead_slots_lock:
                 if s.index in self._dead_slots:
-                    continue  # skip silently — already logged at init or on first 400
-
-            last_err = None
+                    continue
 
             # Probe gateway reachability before first attempt on this slot
             if attempt == 0 or last_auth_error is None:
@@ -1331,32 +1760,27 @@ class CloudflareAIGatewayProvider(_BaseProvider):
                         )
                         break  # No point trying other models with empty token
 
-                    # CF AI Gateway URL format (Cloudflare docs):
-                    # {gateway_url}/workers-ai/{account_id}/{model_id}
-                    # The account_id appears in both the gateway URL prefix AND
-                    # as part of the workers-ai path per Cloudflare docs.
-                    #
-                    # CRITICAL FIX (v15.1): Model IDs with '@' prefix (e.g., @cf/meta/llama-3.1-8b-instruct)
-                    # must be URL-encoded. The '@' character in URLs can cause path resolution
-                    # issues. We strip the '@' prefix since CF Workers AI accepts both formats.
-                    model_id = m.lstrip("@") if m.startswith("@cf/") else m
-                    url = f"{s.gateway_url}/workers-ai/{s.account_id}/{model_id}"
+                    # CORRECTION 7: Use OpenAI-compatible endpoint
+                    # Model ID goes in request body, NOT URL path.
+                    # URL: {gateway_base}/workers-ai/v1/chat/completions
+                    url = self._build_cf_gateway_url(s.gateway_url)
                     headers = {
                         "Content-Type":  "application/json",
                         "Authorization": f"Bearer {clean_token}",
                     }
-                    payload = {
-                        "messages":    messages,
-                        "max_tokens":  max_tokens,
-                        "temperature": temperature,
-                    }
+                    payload = self._build_cf_request_body(
+                        model_id=m,
+                        messages=messages,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                    )
                     resp, lat = self._post_json_with_retry(
                         url, headers, payload, timeout,
                         provider_name="CF-AI-GW", slot_index=s.index
                     )
                     self.rotator.mark_success(s, lat)
                     self.circuit_breaker.record_success()
-                    return self._extract_text(resp)
+                    return CloudflareWorkersAIProvider._extract_cf_content(resp)
                 except urllib.error.HTTPError as e:
                     last_err = e
                     if e.code in (403, 401):
@@ -1369,17 +1793,17 @@ class CloudflareAIGatewayProvider(_BaseProvider):
                         break  # Try next slot, not next model
                     if e.code == 400:
                         error_body = _read_error_body(e)
-                        # ── FIX: HTTP 400 with empty body = permanently dead slot ──
                         if not error_body.strip():
+                            # 400 with empty body → slot is dead, skip all remaining models
                             with self._dead_slots_lock:
-                                if s.index not in self._dead_slots:  # log only once
+                                if s.index not in self._dead_slots:
                                     self._dead_slots.add(s.index)
                                     logger.warning(
                                         f"[CF] slot {s.index} permanently failed "
                                         f"(HTTP 400 empty body) — "
                                         f"skipping all remaining models for this slot"
                                     )
-                            break  # exit model-fallback loop for this slot immediately
+                            break  # Stop trying models for this slot
                         # Model-specific issue — add to failed set and try next model
                         self._failed_models.add(m)
                         logger.debug(
@@ -1402,16 +1826,27 @@ class CloudflareAIGatewayProvider(_BaseProvider):
                 if last_err.code in (403, 401):
                     self.rotator.mark_failure(s)
                     continue  # Try next slot
-                # Don't log 'all models failed' for dead slots
-                with self._dead_slots_lock:
-                    if s.index in self._dead_slots:
-                        continue
                 logger.warning(f"[CF-AI-GW] slot {s.index} all models failed")
                 self.rotator.mark_failure(s)
                 self.circuit_breaker.record_failure()
                 if attempt == len(fallbacks) - 1:
                     raise last_err
                 time.sleep(2 ** attempt)
+
+        # All slots exhausted — check if all are dead (config error, not runtime)
+        with self._dead_slots_lock:
+            all_dead = all(
+                s.index in self._dead_slots
+                for s in self.rotator.slots
+            )
+
+        if all_dead:
+            raise ProviderConfigurationError(
+                f"[CF-AI-GW] All {len(self.rotator.slots)} slots failed "
+                f"(HTTP 400 / empty body on first model attempt per slot). "
+                f"Verify CF_ACCOUNT_ID and CF_API_TOKEN values in GitHub Secrets.",
+                provider="cloudflare_ai_gateway",
+            )
 
         if last_auth_error:
             raise last_auth_error

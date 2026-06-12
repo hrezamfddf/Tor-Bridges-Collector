@@ -1,116 +1,115 @@
-#!/usr/bin/env bash
-# ═══════════════════════════════════════════════════════════════════════════
-# package.sh — Tor-Bridges-Collector Packaging Script v1.0
-# ═══════════════════════════════════════════════════════════════════════════
-# Creates a production-ready tar.gz archive of the entire project.
-# The archive name includes a descriptive version string.
-#
-# USAGE:
-#   ./scripts/package.sh
-#
-# OUTPUT:
-#   Tor-Bridges-Collector-main-ultra-quantum-vip-vip-super-ultra-vip-ultra-
-#   quantum-ultra-vip-ultra-quantum-ultra-quantum-vip-fg-ds-ddhd-ghj-vgg.tar.gz
-#
-# EXIT CODES:
-#   0 — Success
-#   1 — Failure (missing directory, tar error, etc.)
-# ═══════════════════════════════════════════════════════════════════════════
+#!/bin/bash
+# ══════════════════════════════════════════════════════════════════════════
+# Tor-Bridges-Collector — Build & Package Script
+# ══════════════════════════════════════════════════════════════════════════
+# Creates a tar.gz archive of the project with the specified naming.
+# Excludes build artifacts, caches, and sensitive files.
+# ══════════════════════════════════════════════════════════════════════════
 
 set -euo pipefail
 
-# ── Configuration ──────────────────────────────────────────────────────────
-ARCHIVE_NAME="Tor-Bridges-Collector-main-ultra-quantum-vip-vip-super-ultra-vip-ultra-quantum-ultra-vip-ultra-quantum-ultra-quantum-vip-fg-ds-ddhd-ghj-vgg"
-
-# Determine project root (parent of scripts/ directory)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-# Output directory (defaults to project root, can be overridden)
-OUTPUT_DIR="${OUTPUT_DIR:-${PROJECT_ROOT}}"
+PROJECT_NAME="Tor-Bridges-Collector"
+TAR_NAME="${PROJECT_NAME}-main-ultra-quantum-vip-vip-super-ultra-vip-ultra-quantum-ultra-vip-ultra-quantum-ultra-quantum-vip-fg-ds-ddhd-ghj-vgg.tar.gz"
 
-echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║   Tor-Bridges-Collector — Packaging Script v1.0            ║"
-echo "╚══════════════════════════════════════════════════════════════╝"
+echo "═══════════════════════════════════════════════════════════════════════"
+echo "  Tor-Bridges-Collector — Build & Package"
+echo "═══════════════════════════════════════════════════════════════════════"
 echo ""
-echo "  Project root : ${PROJECT_ROOT}"
-echo "  Archive name : ${ARCHIVE_NAME}.tar.gz"
-echo "  Output dir   : ${OUTPUT_DIR}"
+echo "  Project root: ${PROJECT_ROOT}"
+echo "  Archive name: ${TAR_NAME}"
 echo ""
 
-# ── Validation ─────────────────────────────────────────────────────────────
-if [[ ! -d "${PROJECT_ROOT}" ]]; then
-    echo "ERROR: Project root directory does not exist: ${PROJECT_ROOT}" >&2
-    exit 1
+# Step 1: Syntax check all Python files
+echo "── Step 1: Python syntax check ─────────────────────────────────────"
+PASS=0
+FAIL=0
+while IFS= read -r -d '' f; do
+    if python3 -m py_compile "$f" 2>/dev/null; then
+        PASS=$((PASS + 1))
+    else
+        echo "  ✗ SYNTAX ERROR: $f"
+        python3 -m py_compile "$f" 2>&1 || true
+        FAIL=$((FAIL + 1))
+    fi
+done < <(find "${PROJECT_ROOT}" -name '*.py' -not -path '*/vendor/*' -not -path '*/.git/*' -not -path '*/node_modules/*' -print0 2>/dev/null | sort -z)
+echo "  ✓ Passed: ${PASS}  ✗ Failed: ${FAIL}"
+if [ "$FAIL" -gt 0 ]; then
+    echo "  ⚠ WARNING: ${FAIL} Python file(s) have syntax errors!"
+    echo "  Continuing with packaging anyway (errors should be fixed before release)."
 fi
-
-if [[ ! -f "${PROJECT_ROOT}/main.py" ]]; then
-    echo "WARNING: main.py not found in project root — verify project structure" >&2
-fi
-
-# ── Clean up any previous build artifacts ──────────────────────────────────
-echo "[1/4] Cleaning previous build artifacts..."
-find "${PROJECT_ROOT}" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
-find "${PROJECT_ROOT}" -type d -name ".pytest_cache" -exec rm -rf {} + 2>/dev/null || true
-find "${PROJECT_ROOT}" -type f -name "*.pyc" -delete 2>/dev/null || true
-find "${PROJECT_ROOT}" -type f -name "*.pyo" -delete 2>/dev/null || true
-
-echo "[2/4] Verifying project structure..."
-# Count key files to verify we have a complete project
-PY_COUNT=$(find "${PROJECT_ROOT}" -name "*.py" -not -path "*/__pycache__/*" | wc -l)
-YML_COUNT=$(find "${PROJECT_ROOT}" -name "*.yml" -o -name "*.yaml" | wc -l)
-echo "  Python files : ${PY_COUNT}"
-echo "  YAML files   : ${YML_COUNT}"
-
-if [[ ${PY_COUNT} -lt 5 ]]; then
-    echo "ERROR: Too few Python files found — project may be incomplete" >&2
-    exit 1
-fi
-
-echo "[3/4] Creating tar.gz archive..."
-# Create the archive from the project root
-# We use --transform to rename the top-level directory in the archive
-cd "${PROJECT_ROOT}/.."
-BASENAME="$(basename "${PROJECT_ROOT}")"
-
-tar czf "${OUTPUT_DIR}/${ARCHIVE_NAME}.tar.gz" \
-    --transform="s/^${BASENAME}/${ARCHIVE_NAME}/" \
-    --exclude="*.pyc" \
-    --exclude="*.pyo" \
-    --exclude="__pycache__" \
-    --exclude=".pytest_cache" \
-    --exclude=".git" \
-    --exclude="*.egg-info" \
-    --exclude="dist" \
-    --exclude="build" \
-    --exclude=".env" \
-    "${BASENAME}"
-
-TAR_EXIT=$?
-
-if [[ ${TAR_EXIT} -ne 0 ]]; then
-    echo "ERROR: tar failed with exit code ${TAR_EXIT}" >&2
-    exit 1
-fi
-
-echo "[4/4] Verifying archive..."
-ARCHIVE_PATH="${OUTPUT_DIR}/${ARCHIVE_NAME}.tar.gz"
-if [[ ! -f "${ARCHIVE_PATH}" ]]; then
-    echo "ERROR: Archive not found at expected path: ${ARCHIVE_PATH}" >&2
-    exit 1
-fi
-
-ARCHIVE_SIZE=$(du -h "${ARCHIVE_PATH}" | cut -f1)
-FILE_COUNT=$(tar tzf "${ARCHIVE_PATH}" | wc -l)
-
 echo ""
-echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║   PACKAGING COMPLETE                                        ║"
-echo "╠══════════════════════════════════════════════════════════════╣"
-echo "║   Archive : ${ARCHIVE_NAME}.tar.gz"
-echo "║   Size    : ${ARCHIVE_SIZE}"
-echo "║   Files   : ${FILE_COUNT}"
-echo "║   Path    : ${ARCHIVE_PATH}"
-echo "╚══════════════════════════════════════════════════════════════╝"
 
-exit 0
+# Step 2: Create the archive
+echo "── Step 2: Creating tar.gz archive ─────────────────────────────────"
+cd "${PROJECT_ROOT}"
+
+# Create archive in the download directory
+OUTPUT_DIR="${PROJECT_ROOT}/../download"
+mkdir -p "${OUTPUT_DIR}"
+
+tar -czf "${OUTPUT_DIR}/${TAR_NAME}" \
+    --exclude='.git' \
+    --exclude='__pycache__' \
+    --exclude='*.pyc' \
+    --exclude='*.pyo' \
+    --exclude='.env' \
+    --exclude='.venv' \
+    --exclude='venv' \
+    --exclude='node_modules' \
+    --exclude='.mypy_cache' \
+    --exclude='.pytest_cache' \
+    --exclude='.tox' \
+    --exclude='*.egg-info' \
+    --exclude='dist' \
+    --exclude='build' \
+    --exclude='data/*.json' \
+    --exclude='export/*' \
+    --exclude='bridge/*' \
+    --exclude='reports/coverage' \
+    --exclude='*.tar.gz' \
+    --exclude='*.zip' \
+    --transform "s|^|${PROJECT_NAME}-main/|" \
+    .
+
+echo "  ✓ Archive created: ${OUTPUT_DIR}/${TAR_NAME}"
+echo ""
+
+# Step 3: Verify the archive
+echo "── Step 3: Verifying archive ───────────────────────────────────────"
+if [ -f "${OUTPUT_DIR}/${TAR_NAME}" ]; then
+    FILESIZE=$(stat -f%z "${OUTPUT_DIR}/${TAR_NAME}" 2>/dev/null || stat -c%s "${OUTPUT_DIR}/${TAR_NAME}" 2>/dev/null || echo "unknown")
+    echo "  ✓ File exists"
+    echo "  ✓ File size: ${FILESIZE} bytes"
+
+    # List top-level contents
+    echo "  ✓ Top-level contents:"
+    tar -tzf "${OUTPUT_DIR}/${TAR_NAME}" 2>/dev/null | head -20 | sed 's/^/    /' || true
+
+    # Count files
+    FILE_COUNT=$(tar -tzf "${OUTPUT_DIR}/${TAR_NAME}" 2>/dev/null | wc -l | tr -d ' ')
+    echo "  ✓ Total entries: ${FILE_COUNT}"
+else
+    echo "  ✗ Archive file NOT found!"
+    exit 1
+fi
+echo ""
+
+# Step 4: Compute checksums
+echo "── Step 4: Checksums ───────────────────────────────────────────────"
+cd "${OUTPUT_DIR}"
+if command -v sha256sum &>/dev/null; then
+    sha256sum "${TAR_NAME}"
+elif command -v shasum &>/dev/null; then
+    shasum -a 256 "${TAR_NAME}"
+else
+    echo "  ⚠ No sha256sum/shasum available — skipping checksum"
+fi
+echo ""
+
+echo "═══════════════════════════════════════════════════════════════════════"
+echo "  ✓ Package complete!"
+echo "  Output: ${OUTPUT_DIR}/${TAR_NAME}"
+echo "═══════════════════════════════════════════════════════════════════════"

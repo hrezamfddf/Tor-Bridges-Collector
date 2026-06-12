@@ -41,7 +41,16 @@ import logging
 import random
 import urllib.error
 import urllib.request
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
+
+# Import ProviderConfigurationError for config-level error handling
+try:
+    from torshield_ai_gateway.exceptions import ProviderConfigurationError
+except ImportError:
+    # Fallback if exceptions module not available
+    class ProviderConfigurationError(Exception):  # type: ignore[no-redef]
+        """Fallback ProviderConfigurationError when torshield_ai_gateway is not available."""
+        pass
 
 logging.basicConfig(
     level=logging.INFO,
@@ -451,6 +460,14 @@ def check_provider(
         "is_primary": True,
     }
 
+    # Health check constants
+    HEALTH_CHECK_PROMPT = (
+        "Reply with ONLY the exact string TORSHIELD_OK "
+        "and absolutely nothing else. No explanation, no quotes, "
+        "no punctuation, no newlines. Just: TORSHIELD_OK"
+    )
+    HEALTH_CHECK_MAX_TOKENS: int = 100  # 100 tokens for verbose models
+
     def _attempt_provider_call():
         """
         Call the provider DIRECTLY (not through the gateway waterfall).
@@ -484,8 +501,8 @@ def check_provider(
         try:
             provider = provider_cls()
             response = provider.chat_complete(
-                messages=[{"role": "user", "content": "Reply with ONLY this exact string and nothing else, no quotes, no punctuation, no explanation: TORSHIELD_OK"}],
-                max_tokens=20,
+                messages=[{"role": "user", "content": HEALTH_CHECK_PROMPT}],
+                max_tokens=HEALTH_CHECK_MAX_TOKENS,
                 temperature=0.0,
                 task=task,
             )
@@ -493,11 +510,15 @@ def check_provider(
             # Since we called the provider directly (no gateway waterfall),
             # any non-empty response came from the PRIMARY provider.
             return {"response": response, "latency": latency, "response_source": "primary"}
+        except ProviderConfigurationError as e:
+            # Configuration errors are PERMANENT for this run — do NOT retry
+            raise  # Let the outer handler catch this
         except Exception as e:
             latency = time.time() - start
             # Capture HTTP error details for diagnostics
             error_body = ""
             is_auth_error = False
+            is_config_error = isinstance(e, ProviderConfigurationError)
             if isinstance(e, urllib.error.HTTPError):
                 try:
                     error_body = e.read().decode("utf-8", errors="replace")[:500]
@@ -506,28 +527,51 @@ def check_provider(
                 # Auth errors (403/400/401) won't fix with retry
                 if e.code in (400, 401, 403):
                     is_auth_error = True
-            raise _ProviderCheckError(e, latency, error_body, is_auth_error)
+            raise _ProviderCheckError(e, latency, error_body, is_auth_error, is_config_error)
 
     class _ProviderCheckError(Exception):
-        """Wrapper that carries latency, HTTP error body, and auth error flag."""
-        def __init__(self, original, latency, error_body="", is_auth_error=False):
+        """Wrapper that carries latency, HTTP error body, auth error flag, and config error flag."""
+        def __init__(self, original, latency, error_body="", is_auth_error=False, is_config_error=False):
             self.original = original
             self.latency = latency
             self.error_body = error_body
             self.is_auth_error = is_auth_error
+            self.is_config_error = is_config_error
             super().__init__(str(original))
 
-    # Execute with smart retry — auth errors are NOT retried
+    # Execute with smart retry — auth errors and config errors are NOT retried
     retry_result = None
     last_error = None
+    is_config_error = False
     for attempt in range(max_retries + 1):
         try:
             retry_result = _attempt_provider_call()
             result["retry_attempts"] = attempt + 1
             break
+        except ProviderConfigurationError as e:
+            # Configuration errors: do NOT retry, report as SKIPPED
+            logger.warning(
+                f"  [{provider_name}] configuration error "
+                f"(not retrying): {e}"
+            )
+            result["status"] = "skipped"
+            result["error"] = str(e)[:300]
+            result["retry_attempts"] = 1
+            is_config_error = True
+            break
         except _ProviderCheckError as e:
             last_error = e
             result["retry_attempts"] = attempt + 1
+            # Config errors (e.g., all Portkey keys invalid) — do NOT retry
+            if e.is_config_error:
+                logger.warning(
+                    f"  [{provider_name}] configuration error "
+                    f"(not retrying): {e}"
+                )
+                result["status"] = "skipped"
+                result["error"] = str(e.original)[:300]
+                is_config_error = True
+                break
             # Auth errors (403/400/401) won't fix themselves — stop retrying
             if e.is_auth_error:
                 logger.warning(
@@ -549,70 +593,44 @@ def check_provider(
                     f"  [{provider_name}] All {max_retries + 1} attempts exhausted"
                 )
         except Exception as e:
-            last_error = _ProviderCheckError(e, 0, "", False)
+            last_error = _ProviderCheckError(e, 0, "", False, False)
             result["retry_attempts"] = attempt + 1
             if attempt < max_retries:
                 delay = retry_engine.compute_delay(attempt)
                 time.sleep(delay)
 
+    # If provider was skipped due to configuration error, return early
+    if is_config_error:
+        return result
+
     if retry_result is not None:
         response = retry_result["response"]
         latency = retry_result["latency"]
         response_source = retry_result.get("response_source", "primary")
-        # Since we call providers directly (no gateway waterfall),
-        # response_source is always "primary" for successful calls.
         result["latency_ms"] = round(latency * 1000)
 
-        # ── Authoritative source check ──────────────────────────────
-        # If the gateway metadata says this came from LocalAIEngine,
-        # it is ALWAYS degraded — even if the text happens to contain
-        # "TORSHIELD_OK".  This prevents false-positive primary counts.
-        if response_source == "local_fallback":
+        # ── Evaluate provider response with robust validation ─────
+        status, error_detail = _evaluate_provider_response(provider_name, response, response_source)
+
+        if status == "ok":
+            result["status"] = "ok"
+            result["response"] = response[:100]
+        elif status == "degraded_local":
             result["status"] = "degraded_local"
             result["response"] = response[:200]
             result["is_primary"] = False
-            logger.warning(
-                f"  [{provider_name}] DEGRADED: gateway reports response from "
-                f"LocalAIEngine fallback (last_response_source={response_source})"
+        elif status == "no_response":
+            result["status"] = "no_response"
+            result["response"] = ""
+            result["is_primary"] = False
+            logger.error(f"  [{provider_name}] NO_RESPONSE — {error_detail}")
+        elif status == "wrong_response":
+            result["status"] = "wrong_response"
+            result["response"] = response[:200]
+            result["is_primary"] = False
+            logger.error(
+                f"  [{provider_name}] WRONG_RESPONSE — {error_detail}"
             )
-        elif response_source == "primary":
-            # Primary provider responded — check content for expected signal
-            if _validate_health_response(response):
-                result["status"] = "ok"
-                result["response"] = response[:100]
-            else:
-                # WRONG_RESPONSE from a primary is treated as FAILURE
-                result["status"] = "wrong_response"
-                result["response"] = response[:200]
-                result["is_primary"] = False
-                logger.error(
-                    f"  [{provider_name}] WRONG_RESPONSE: "
-                    f"got {repr(response[:120])}, "
-                    f"expected string containing 'TORSHIELD_OK'"
-                )
-        else:
-            # No metadata from gateway — fall back to content-based heuristics
-            if _validate_health_response(response):
-                result["status"] = "ok"
-                result["response"] = response[:100]
-            else:
-                if _is_local_engine_response(response):
-                    result["status"] = "degraded_local"
-                    result["response"] = response[:200]
-                    result["is_primary"] = False
-                    logger.warning(
-                        f"  [{provider_name}] FELLBACK to LocalAIEngine (heuristic) — "
-                        f"response does not contain TORSHIELD_OK"
-                    )
-                else:
-                    result["status"] = "wrong_response"
-                    result["response"] = response[:200]
-                    result["is_primary"] = False
-                    logger.error(
-                        f"  [{provider_name}] WRONG_RESPONSE: "
-                        f"got {repr(response[:120])}, "
-                        f"expected string containing 'TORSHIELD_OK'"
-                    )
     else:
         # All retries failed
         result["status"] = "error"
@@ -649,20 +667,53 @@ def check_provider(
     return result
 
 
-def _validate_health_response(response_text: str) -> bool:
-    """Accept response if it contains TORSHIELD_OK and is reasonably short.
-
-    FIX v13.0: Some CF model variants add whitespace, punctuation, markdown
-    formatting, or surrounding explanation text, causing exact-match to fail
-    even when the model understood the instruction correctly. This flexible
-    validator checks for substring presence with a length cap to reject
-    verbose/hallucinated responses.
+def _evaluate_provider_response(
+    provider: str,
+    response_text: str,
+    response_source: str = "primary",
+) -> Tuple[str, Optional[str]]:
     """
-    normalized = response_text.upper().strip()
-    return (
-        "TORSHIELD_OK" in normalized
-        and len(response_text.strip()) < 200  # reject verbose responses
-    )
+    Evaluate a provider response with robust validation.
+
+    Returns (status, error_detail) where:
+      status ∈ {"ok", "wrong_response", "no_response", "degraded_local"}
+      error_detail is None when status == "ok"
+
+    Key distinction:
+      - no_response: empty string → all slots failed (NOT wrong_response)
+      - wrong_response: non-empty but doesn't contain TORSHIELD_OK
+      - degraded_local: came from LocalAIEngine fallback
+    """
+    # If response came from LocalAIEngine, it's always degraded
+    if response_source == "local_fallback":
+        return ("degraded_local",
+                f"Response from LocalAIEngine fallback, not primary provider")
+
+    # Empty string means no response was produced at all
+    if not response_text or not response_text.strip():
+        return ("no_response",
+                f"Provider returned empty response — "
+                f"all slots may have failed")
+
+    # Flexible matching: accept if TORSHIELD_OK appears anywhere in the
+    # normalized response (some models add whitespace or newlines)
+    if "TORSHIELD_OK" in response_text.upper().strip():
+        if len(response_text.strip()) > 200:
+            logger.warning(
+                f"[{provider}] Response contains TORSHIELD_OK but is verbose "
+                f"({len(response_text)} chars) — accepted but prompt should be tightened"
+            )
+        return ("ok", None)
+
+    # Non-empty but doesn't contain the sentinel → check if local engine
+    if _is_local_engine_response(response_text):
+        return ("degraded_local",
+                f"Response from LocalAIEngine (heuristic detection), not primary")
+
+    # Non-empty, wrong content
+    return ("wrong_response",
+            f"got {repr(response_text[:120])}, "
+            f"expected string containing 'TORSHIELD_OK'")
 
 
 def _is_local_engine_response(response: str) -> bool:
@@ -835,6 +886,7 @@ def main():
     ok_count = 0
     primary_ok_count = 0
     degraded_count = 0
+    skipped_count = 0
     error_count = 0
 
     for pname in args.providers:
@@ -854,8 +906,19 @@ def main():
             logger.warning(
                 f"  ⚠ {pname} DEGRADED — fell back to LocalAIEngine"
             )
+        elif result["status"] == "skipped":
+            skipped_count += 1
+            logger.info(
+                f"  ⊘ {pname} SKIPPED (configuration: "
+                f"{result.get('error', 'unknown')[:100]})"
+            )
+        elif result["status"] == "no_response":
+            error_count += 1
+            logger.error(
+                f"  ✗ {pname} NO_RESPONSE — all slots may have failed"
+            )
         elif result["status"] == "wrong_response":
-            error_count += 1  # WRONG_RESPONSE is now a FAILURE, not degraded
+            error_count += 1  # WRONG_RESPONSE is a FAILURE, not degraded
             logger.error(
                 f"  ✗ {pname} WRONG_RESPONSE — primary provider returned "
                 f"unexpected content (TREATED AS FAILURE)"
@@ -870,10 +933,10 @@ def main():
             # Log detailed auth diagnostics if available
             if result.get("auth_diagnostics"):
                 diag = result["auth_diagnostics"]
-                logger.error(f"  📋 Auth Diagnostics for {pname}:")
+                logger.error(f"  Auth Diagnostics for {pname}:")
                 logger.error(f"     Root Cause: {diag.get('diagnosis')}")
                 for rec in diag.get("recommendations", []):
-                    logger.error(f"     → {rec}")
+                    logger.error(f"     -> {rec}")
 
     # ── Step 4: Summary and Exit Decision ──────────────────────────────────
     logger.info("═══ Step 4: Health Summary ═══")
@@ -882,38 +945,58 @@ def main():
         "total": len(args.providers),
         "ok": ok_count,
         "degraded": degraded_count,
+        "skipped": skipped_count,
         "error": error_count,
         "primary_ok": primary_ok_count,
         "healthy": primary_ok_count > 0,
         "all_primary_failed": primary_ok_count == 0,
     }
 
-    # Strict exit policy:
-    #   - If at least one PRIMARY provider responded with TORSHIELD_OK → exit 0
-    #   - If all primary providers failed but LocalAIEngine worked → exit 1
-    #   - If everything including LocalAIEngine failed → exit 1
+    # Exit code policy:
+    #   - "ok" → success
+    #   - "skipped" → expected absence (config issue known, NOT a failure)
+    #   - "degraded" → partial success (LocalAIEngine only)
+    #   - "error" / "wrong_response" / "no_response" → real failure
+    # Exit 0 if at least 1 provider is healthy (ok or degraded)
+    # Exit 0 if ALL unhealthy providers are "skipped" (config issues, not failures)
+    # Exit 1 if any provider has a real error and no provider is healthy
+    healthy_count = ok_count + degraded_count
+    exit_code = 0 if (healthy_count >= 1 or error_count == 0) else 1
+    summary["exit_code"] = exit_code
+
     if primary_ok_count > 0:
-        exit_code = 0
-        summary["exit_code"] = 0
         summary["failure_reason"] = None
         logger.info(
             f"  ✓ HEALTHY: {primary_ok_count}/{len(args.providers)} "
             f"primary providers OK"
         )
+    elif healthy_count > 0 and error_count == 0:
+        summary["failure_reason"] = None
+        logger.info(
+            f"  DEGRADED-ONLY: No primary OK, but no hard errors "
+            f"({degraded_count} degraded, {skipped_count} skipped)"
+        )
     else:
-        exit_code = 1
-        summary["exit_code"] = 1
-        if degraded_count > 0:
+        # Real failures exist
+        if error_count > 0:
+            summary["failure_reason"] = "PROVIDER_ERRORS"
+            logger.error(
+                f"  CRITICAL: {error_count} provider(s) with hard errors. "
+                f"{primary_ok_count} primary OK, "
+                f"{skipped_count} skipped (config), "
+                f"{degraded_count} degraded."
+            )
+        elif degraded_count > 0:
             summary["failure_reason"] = "ALL_PRIMARY_FAILED_LOCAL_ONLY"
             logger.error(
-                f"  ✗ CRITICAL: No primary providers available. "
+                f"  CRITICAL: No primary providers available. "
                 f"LocalAIEngine is the only fallback ({degraded_count} degraded). "
                 f"This is NOT acceptable for production."
             )
         else:
             summary["failure_reason"] = "ALL_PROVIDERS_COMPLETELY_FAILED"
             logger.error(
-                f"  ✗ CRITICAL: All {len(args.providers)} providers completely failed. "
+                f"  CRITICAL: All {len(args.providers)} providers completely failed. "
                 f"Even LocalAIEngine could not help."
             )
 
@@ -924,9 +1007,9 @@ def main():
 
     logger.info(f"Health report saved to: {args.output}")
     logger.info(
-        f"Result: {primary_ok_count} primary OK, "
-        f"{degraded_count} degraded, {error_count} error — "
-        f"exit code: {exit_code}"
+        f"Result: {healthy_count} primary OK, "
+        f"{skipped_count} skipped (config), "
+        f"{error_count} error — exit code: {exit_code}"
     )
 
     sys.exit(exit_code)

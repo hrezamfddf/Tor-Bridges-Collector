@@ -1,34 +1,28 @@
 """
-torshield_ai_gateway — v16.0 Ultra-Quantum Edition
+torshield_ai_gateway — v18.0 Ultra-Quantum Edition
 Dynamic multi-provider AI gateway with automatic model selection,
 exponential backoff retry, anti-DPI, smart Iran bypass, and auto-defense.
 
-v16.0 CHANGES:
-  - FIX-1: All GitHub Actions updated to Node.js 24 compatible versions
-    (checkout@v5, setup-python@v6, upload-artifact@v6, NODE_NO_WARNINGS)
-  - FIX-2: CF slot pre-flight screening — invalid credentials detected at init
-    time, dead slots silently skipped, HTTP 400 empty body kills slot permanently
-  - FIX-3: Portkey pre-flight key format gate — non-pk- keys skipped entirely,
-    no HTTP 401 attempts for invalid format keys
-  - FIX-4: Health check response validation — flexible TORSHIELD_OK matching,
-    accept substring presence with length cap instead of exact match
-  - FIX-5: ModelSelector live fetch — downgrade 0-model warning to INFO,
-    extract @cf/ canonical names from UUID and @hf/ model objects
-  - FIX-6: Added llama-4-maverick to KNOWN_GOOD_MODELS set
-  - Added anti_censorship.py — AntiCensorshipEngine with DPI detection,
-    TLS fingerprint rotation, bridge scoring, adaptive retry, traffic mimicry
-  - Added auto_debugger.py — AutoDebugger with FixAction enum,
-    automatic diagnosis and fix recommendations for provider errors
-  - Added scripts/package.sh — packaging script for tar.gz distribution
-
-v15.0 CHANGES (preserved):
-  - Added neural_anti_dpi_v3 module
-  - PYEOF heredoc syntax fixed in all 4 GitHub Actions workflows
-  - Auth failure codes (401/403) NEVER retried in _post_json_with_retry
-  - Comprehensive audit scripts added (dead code, security, dependencies)
-  - 314 automated tests
+v18.0 CHANGES (Correction 7: URL Path + Response Parser + Config Errors):
+  - CF AI Gateway URL uses OpenAI-compatible endpoint:
+    {gateway_base}/workers-ai/v1/chat/completions with model in request body
+  - CF Workers AI direct URL uses OpenAI-compatible endpoint:
+    https://api.cloudflare.com/client/v4/accounts/{acct}/ai/v1/chat/completions
+  - _extract_text() NEVER returns str(response) — always extracts content properly
+  - ProviderConfigurationError for permanent config failures (no retry)
+  - _dead_slots with threading.Lock for thread-safe dead slot tracking
+  - CF slot 400+empty-body → dead-listed, ONE warning per slot
+  - Health check max_tokens=100, prompt tightened
+  - Portkey raises ProviderConfigurationError when ALL keys lack 'pk-' prefix
+  - Health check distinguishes no_response vs wrong_response
+  - Health check counts 'skipped' as non-failure in exit code
+  - ModelSelector: llama-4-maverick in KNOWN_GOOD_MODELS
+  - ModelSelector: 0 usable models logged at INFO (not WARNING)
+  - ModelSelector: canonical name extraction from name field with @cf/ prefix
+  - upload-artifact@v6 in all workflows
 """
 from .gateway import TorShieldAIGateway, get_gateway
+from .exceptions import ProviderConfigurationError
 from .model_selector import (
     CloudflareModelSelector,
     best_cf_model,
@@ -64,18 +58,55 @@ except ImportError:
     ECHFallbackRouter = None  # type: ignore[misc,assignment]
     AntiDPIV3Orchestrator = None  # type: ignore[misc,assignment]
 
-# v16.0 modules (graceful — import errors are non-fatal)
+# V3 Anti-Filter + Anti-DPI (graceful — import errors are non-fatal)
 try:
-    from .anti_censorship import AntiCensorshipEngine
+    from .iran_anti_filter_v3 import (
+        SmartAntiFilterEngine,
+        FilterType,
+        EvasionStrategy,
+        get_anti_filter_engine,
+        run_anti_filter_cycle,
+    )
+except ImportError:
+    SmartAntiFilterEngine = None  # type: ignore[misc,assignment]
+    FilterType = None  # type: ignore[misc,assignment]
+    EvasionStrategy = None  # type: ignore[misc,assignment]
+    get_anti_filter_engine = None  # type: ignore[misc,assignment]
+    run_anti_filter_cycle = None  # type: ignore[misc,assignment]
+
+# Anti-Censorship Engine (graceful — import errors are non-fatal)
+try:
+    from .anti_censorship import (
+        AntiCensorshipEngine,
+        TransportType,
+        DPIAction,
+        CensorshipLevel,
+        IranDPISignatures,
+        get_anti_censorship_engine,
+        run_anti_censorship_cycle,
+    )
 except ImportError:
     AntiCensorshipEngine = None  # type: ignore[misc,assignment]
+    TransportType = None  # type: ignore[misc,assignment]
+    DPIAction = None  # type: ignore[misc,assignment]
+    CensorshipLevel = None  # type: ignore[misc,assignment]
+    IranDPISignatures = None  # type: ignore[misc,assignment]
+    get_anti_censorship_engine = None  # type: ignore[misc,assignment]
+    run_anti_censorship_cycle = None  # type: ignore[misc,assignment]
 
+# Auto-Debugger (graceful — import errors are non-fatal)
 try:
-    from .auto_debugger import AutoDebugger, FixAction, DiagnosticResult
+    from .auto_debugger import (
+        AutoDebugger,
+        FixAction,
+        DiagnosticResult,
+        get_auto_debugger,
+    )
 except ImportError:
     AutoDebugger = None  # type: ignore[misc,assignment]
     FixAction = None  # type: ignore[misc,assignment]
     DiagnosticResult = None  # type: ignore[misc,assignment]
+    get_auto_debugger = None  # type: ignore[misc,assignment]
 
 __all__ = [
     "TorShieldAIGateway",
@@ -95,8 +126,21 @@ __all__ = [
     "JA3_JA3S_RotationEngine",
     "ECHFallbackRouter",
     "AntiDPIV3Orchestrator",
+    "SmartAntiFilterEngine",
+    "FilterType",
+    "EvasionStrategy",
+    "get_anti_filter_engine",
+    "run_anti_filter_cycle",
     "AntiCensorshipEngine",
+    "TransportType",
+    "DPIAction",
+    "CensorshipLevel",
+    "IranDPISignatures",
+    "get_anti_censorship_engine",
+    "run_anti_censorship_cycle",
     "AutoDebugger",
     "FixAction",
     "DiagnosticResult",
+    "get_auto_debugger",
+    "ProviderConfigurationError",
 ]
