@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """
-AI Gateway Health Check v12.0 — Ultra-Quantum Edition
+AI Gateway Health Check v13.0 — Ultra-Quantum Edition
 ═══════════════════════════════════════════════════════════════════════════
+
+CRITICAL FIXES from v12.0:
+  1. FIX: Portkey key validation — removed pk- prefix check, uses length check (>=16)
+  2. FIX: max_tokens raised to 256 for verbose/reasoning models
+  3. FIX: Health check prompt simplified for maximum compliance
+  4. FIX: BadRequestError handling — 400 is NOT an auth failure
 
 CRITICAL FIXES from v11.0:
   1. FIX: Auth errors (403/400/401) are NOT retried — they won't fix themselves
@@ -45,11 +51,14 @@ from typing import Dict, List, Optional, Any, Tuple
 
 # Import ProviderConfigurationError for config-level error handling
 try:
-    from torshield_ai_gateway.exceptions import ProviderConfigurationError
+    from torshield_ai_gateway.exceptions import ProviderConfigurationError, BadRequestError
 except ImportError:
     # Fallback if exceptions module not available
     class ProviderConfigurationError(Exception):  # type: ignore[no-redef]
         """Fallback ProviderConfigurationError when torshield_ai_gateway is not available."""
+        pass
+    class BadRequestError(Exception):  # type: ignore[no-redef]
+        """Fallback BadRequestError when torshield_ai_gateway is not available."""
         pass
 
 logging.basicConfig(
@@ -461,12 +470,8 @@ def check_provider(
     }
 
     # Health check constants
-    HEALTH_CHECK_PROMPT = (
-        "Reply with ONLY the exact string TORSHIELD_OK "
-        "and absolutely nothing else. No explanation, no quotes, "
-        "no punctuation, no newlines. Just: TORSHIELD_OK"
-    )
-    HEALTH_CHECK_MAX_TOKENS: int = 100  # 100 tokens for verbose models
+    HEALTH_CHECK_PROMPT = "Reply with exactly the word: TORSHIELD_OK"
+    HEALTH_CHECK_MAX_TOKENS: int = 256  # 256 tokens — enough for verbose/reasoning models
 
     def _attempt_provider_call():
         """

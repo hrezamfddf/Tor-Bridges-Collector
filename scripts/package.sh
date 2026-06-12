@@ -12,7 +12,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 PROJECT_NAME="Tor-Bridges-Collector"
-TAR_NAME="${PROJECT_NAME}-main-ultra-quantum-vip-vip-super-ultra-vip-ultra-quantum-ultra-vip-ultra-quantum-ultra-quantum-vip-fg-ds-ddhd-ghj-vgg.tar.gz"
+TAR_NAME="${PROJECT_NAME}-main-ultra-quantum-vip-vip-super-ultra-vip-ultra-quantum-ultra-vip-ultra-quantum-ultra-quantum-vip-fg-ds-ddhd-ghj-vgg-vggggh.tar.gz"
 
 echo "═══════════════════════════════════════════════════════════════════════"
 echo "  Tor-Bridges-Collector — Build & Package"

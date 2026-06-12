@@ -31,10 +31,13 @@ from urllib.error import HTTPError
 
 # Import for config-level error awareness
 try:
-    from .exceptions import ProviderConfigurationError
+    from .exceptions import ProviderConfigurationError, BadRequestError
 except ImportError:
     class ProviderConfigurationError(Exception):  # type: ignore[no-redef]
         """Fallback when exceptions module not available."""
+        pass
+    class BadRequestError(Exception):  # type: ignore[no-redef]
+        """Fallback BadRequestError when exceptions module not available."""
         pass
 
 logger = logging.getLogger("torshield.auto_debugger")
@@ -98,10 +101,16 @@ _ERROR_PATTERNS = {
         "confidence": 0.90,
     },
     # Model errors — need to switch model
-    "model_400": {
-        "pattern": re.compile(r"400|bad.?request|model.?not.?found|invalid.?model", re.IGNORECASE),
+    "bad_request_400": {
+        "pattern": re.compile(r"BadRequestError|HTTP 400|bad.?request", re.IGNORECASE),
         "action": FixAction.SWITCH_MODEL,
-        "reasoning": "HTTP 400 Bad Request — model ID is invalid or not available",
+        "reasoning": "HTTP 400 Bad Request — NOT an auth failure. Check model ID, URL path, or payload format. Try next model.",
+        "confidence": 0.90,
+    },
+    "model_400": {
+        "pattern": re.compile(r"model.?not.?found|invalid.?model", re.IGNORECASE),
+        "action": FixAction.SWITCH_MODEL,
+        "reasoning": "Model ID is invalid or not available on this provider",
         "confidence": 0.85,
     },
     "model_404": {

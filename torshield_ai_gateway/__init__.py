@@ -1,5 +1,5 @@
 """
-torshield_ai_gateway — v18.0 Ultra-Quantum Edition
+torshield_ai_gateway — v19.0 Ultra-Quantum Edition
 Dynamic multi-provider AI gateway with automatic model selection,
 exponential backoff retry, anti-DPI, smart Iran bypass, and auto-defense.
 
@@ -13,16 +13,14 @@ v18.0 CHANGES (Correction 7: URL Path + Response Parser + Config Errors):
   - _dead_slots with threading.Lock for thread-safe dead slot tracking
   - CF slot 400+empty-body → dead-listed, ONE warning per slot
   - Health check max_tokens=100, prompt tightened
-  - Portkey raises ProviderConfigurationError when ALL keys lack 'pk-' prefix
-  - Health check distinguishes no_response vs wrong_response
-  - Health check counts 'skipped' as non-failure in exit code
-  - ModelSelector: llama-4-maverick in KNOWN_GOOD_MODELS
-  - ModelSelector: 0 usable models logged at INFO (not WARNING)
-  - ModelSelector: canonical name extraction from name field with @cf/ prefix
-  - upload-artifact@v6 in all workflows
+  - Portkey key validation: prefix check removed, length-only check (>=16 chars)
+  - BadRequestError for HTTP 400 — separated from auth failures
+  - normalize_cf_gateway_url() auto-fixes bare gateway URLs
+  - Circuit breaker threshold raised to max(n_slots, 20)
+  - Health check max_tokens=256, prompt simplified
 """
 from .gateway import TorShieldAIGateway, get_gateway
-from .exceptions import ProviderConfigurationError
+from .exceptions import ProviderConfigurationError, BadRequestError
 from .model_selector import (
     CloudflareModelSelector,
     best_cf_model,
@@ -84,6 +82,8 @@ try:
         IranDPISignatures,
         get_anti_censorship_engine,
         run_anti_censorship_cycle,
+        IranDPIEvasionV2,
+        get_dpi_evasion_v2,
     )
 except ImportError:
     AntiCensorshipEngine = None  # type: ignore[misc,assignment]
@@ -93,6 +93,8 @@ except ImportError:
     IranDPISignatures = None  # type: ignore[misc,assignment]
     get_anti_censorship_engine = None  # type: ignore[misc,assignment]
     run_anti_censorship_cycle = None  # type: ignore[misc,assignment]
+    IranDPIEvasionV2 = None  # type: ignore[misc,assignment]
+    get_dpi_evasion_v2 = None  # type: ignore[misc,assignment]
 
 # Auto-Debugger (graceful — import errors are non-fatal)
 try:
@@ -138,9 +140,12 @@ __all__ = [
     "IranDPISignatures",
     "get_anti_censorship_engine",
     "run_anti_censorship_cycle",
+    "IranDPIEvasionV2",
+    "get_dpi_evasion_v2",
     "AutoDebugger",
     "FixAction",
     "DiagnosticResult",
     "get_auto_debugger",
     "ProviderConfigurationError",
+    "BadRequestError",
 ]

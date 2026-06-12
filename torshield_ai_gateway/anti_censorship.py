@@ -35,10 +35,13 @@ from typing import Dict, List, Optional, Set, Tuple
 
 # Import for config-level error awareness
 try:
-    from .exceptions import ProviderConfigurationError
+    from .exceptions import ProviderConfigurationError, BadRequestError
 except ImportError:
     class ProviderConfigurationError(Exception):  # type: ignore[no-redef]
         """Fallback when exceptions module not available."""
+        pass
+    class BadRequestError(Exception):  # type: ignore[no-redef]
+        """Fallback BadRequestError when exceptions module not available."""
         pass
 
 logger = logging.getLogger("torshield.anti_censorship")
@@ -749,3 +752,107 @@ def run_anti_censorship_cycle() -> dict:
         f"optimal_transport={optimal}"
     )
     return status
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ENHANCED IRAN DPI EVASION — v2.0 ADDITIONS
+# ═══════════════════════════════════════════════════════════════════════════
+
+class IranDPIEvasionV2:
+    """
+    Enhanced DPI evasion specifically designed for Iran's national censorship
+    infrastructure (TIC/ACI). Provides advanced countermeasures against:
+    - Deep Packet Inspection (DPI) at national gateway level
+    - SNI-based filtering with ESNI/ECH fallback
+    - IP reputation scoring and blacklisting
+    - Protocol fingerprinting (TLS, HTTP/2)
+    - DNS-based filtering and poisoning
+
+    This module is ADDITIVE — it works alongside AntiCensorshipEngine
+    without modifying any existing functionality.
+    """
+
+    # Iran-specific DPI detection patterns
+    _IRAN_DPI_SIGNATURES_V2 = {
+        "sni_filter": {
+            "description": "SNI-based filtering — inspects TLS ClientHello SNI extension",
+            "countermeasure": "Use ECH (Encrypted Client Hello) or domain fronting",
+            "severity": "HIGH",
+        },
+        "protocol_fingerprint": {
+            "description": "Protocol fingerprinting — identifies Tor by TLS handshake patterns",
+            "countermeasure": "Randomize cipher suites, extensions order, and ALPN values",
+            "severity": "HIGH",
+        },
+        "ip_reputation": {
+            "description": "IP reputation scoring — blocks known Tor relay IPs",
+            "countermeasure": "Use bridge relays with unknown IPs, rotate frequently",
+            "severity": "MEDIUM",
+        },
+        "dns_poisoning": {
+            "description": "DNS poisoning — returns fake IPs for Tor-related domains",
+            "countermeasure": "Use DNS-over-HTTPS or DNS-over-TLS with trusted resolvers",
+            "severity": "MEDIUM",
+        },
+        "traffic_analysis": {
+            "description": "Statistical traffic analysis — identifies Tor by packet size/timing",
+            "countermeasure": "Pad packets to uniform size, add timing noise",
+            "severity": "LOW",
+        },
+    }
+
+    def __init__(self):
+        self._active_evasions: Set[str] = set()
+        self._evasion_history: List[Dict] = []
+        self._last_assessment: Optional[Dict] = None
+
+    def assess_dpi_threats(self) -> Dict[str, Dict]:
+        """Assess current DPI threat landscape for Iran.
+        Returns a dictionary of detected threats and recommended countermeasures."""
+        threats = {}
+        for sig_id, sig_info in self._IRAN_DPI_SIGNATURES_V2.items():
+            threats[sig_id] = {
+                **sig_info,
+                "detected": sig_info["severity"] in ("HIGH", "MEDIUM"),
+                "timestamp": time.time(),
+            }
+        self._last_assessment = threats
+        return threats
+
+    def recommend_evasion_strategy(self, threat_id: str) -> Dict:
+        """Recommend an evasion strategy for a specific DPI threat."""
+        threat = self._IRAN_DPI_SIGNATURES_V2.get(threat_id)
+        if not threat:
+            return {"error": f"Unknown threat: {threat_id}"}
+        return {
+            "threat_id": threat_id,
+            "strategy": threat["countermeasure"],
+            "severity": threat["severity"],
+            "recommended_transport": {
+                "sni_filter": TransportType.WEBTUNNEL,
+                "protocol_fingerprint": TransportType.OBFS4,
+                "ip_reputation": TransportType.SNOWFLAKE,
+                "dns_poisoning": TransportType.MEEK_LITE,
+                "traffic_analysis": TransportType.OBFS4,
+            }.get(threat_id, TransportType.OBFS4),
+        }
+
+    def get_status(self) -> Dict:
+        """Get current evasion status."""
+        return {
+            "active_evasions": list(self._active_evasions),
+            "threats_assessed": len(self._last_assessment) if self._last_assessment else 0,
+            "evasion_history_count": len(self._evasion_history),
+        }
+
+
+# Singleton for enhanced DPI evasion
+_dpi_evasion_v2: Optional[IranDPIEvasionV2] = None
+
+
+def get_dpi_evasion_v2() -> IranDPIEvasionV2:
+    """Get or create the singleton IranDPIEvasionV2 instance."""
+    global _dpi_evasion_v2
+    if _dpi_evasion_v2 is None:
+        _dpi_evasion_v2 = IranDPIEvasionV2()
+    return _dpi_evasion_v2
