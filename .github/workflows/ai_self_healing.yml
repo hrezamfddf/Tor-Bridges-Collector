@@ -1,0 +1,277 @@
+# TorShield-IR AI Self-Healing Engine v9.0
+# FIXED v8.1:
+#   - Added pip install -r requirements.txt (was missing entirely)
+#   - Uses pip cache to avoid re-downloading on every trigger
+# FIXED v9.0:
+#   - Added failure categorization step before AutoDebugEngine
+#   - Only runs AutoDebugEngine for fixable categories (syntax_error, auth_failure, model_error)
+#   - Skips for transient failures (network_error, timeout) that will self-resolve
+#   - Logs the failure category to workflow output
+# Triggers on ANY workflow failure. Diagnoses + patches automatically.
+# Additive-only policy enforced in AutoDebugEngine.apply_patch_to_repo().
+name: AI Self-Healing Engine
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+  NODE_NO_WARNINGS: '1'
+
+on:
+  workflow_run:
+    workflows: ["*"]
+    types: [completed]
+
+jobs:
+  auto-diagnose-and-fix:
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      failure_category: ${{ steps.categorize-failure.outputs.category }}
+      is_fixable: ${{ steps.categorize-failure.outputs.is_fixable }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: 'pip'
+
+      # FIX: was missing entirely — caused ModuleNotFoundError on every run
+      - name: Install Python dependencies
+        run: |
+          set -euo pipefail
+          pip install -r requirements.txt
+
+      - name: Ensure output dirs
+        run: mkdir -p data
+
+      # ════════════════════════════════════════════════════════════════════════
+      # FAILURE CATEGORIZATION: Classify the failure type before attempting
+      # auto-debug. This prevents wasted resources on transient failures
+      # that will self-resolve, and focuses AutoDebugEngine on fixable issues.
+      #
+      # Categories:
+      #   fixable:     syntax_error, auth_failure, model_error
+      #   transient:   network_error, timeout (skip AutoDebugEngine)
+      # ════════════════════════════════════════════════════════════════════════
+      - name: Categorize Failure
+        id: categorize-failure
+        env:
+          GH_PAT_AUTOFIX:        ${{ secrets.GH_PAT_AUTOFIX }}
+          GH_REPO_OWNER:         ${{ secrets.GH_REPO_OWNER }}
+          GH_REPO_NAME:          ${{ secrets.GH_REPO_NAME }}
+        run: |
+          echo "═══ Failure Categorization ═══"
+          cat > /tmp/_categorize.py << 'ENDSCRIPT'
+          import json, os, sys, re
+          sys.path.insert(0, ".")
+          try:
+              from monitoring.structured_logging import FailureAnalytics
+              analytics = FailureAnalytics()
+          except ImportError:
+              analytics = None
+          token = os.environ.get("GH_PAT_AUTOFIX", "")
+          owner = os.environ.get("GH_REPO_OWNER", "")
+          repo  = os.environ.get("GH_REPO_NAME", "")
+          workflow_name = os.environ.get("GITHUB_WORKFLOW", "unknown")
+          category = "unknown"
+          is_fixable = "false"
+          fixable_patterns = {
+              "syntax_error": [
+                  "SyntaxError", "IndentationError", "TabError",
+                  "syntax error", "unexpected token", "invalid syntax",
+                  "py_compile", "syntax check failed",
+              ],
+              "auth_failure": [
+                  "401", "403", "Unauthorized", "Forbidden",
+                  "invalid api key", "authentication failed",
+                  "access denied", "auth error",
+              ],
+              "model_error": [
+                  "model not found", "invalid model",
+                  "wrong response", "no route for URI",
+                  "model_error", "ValueError",
+              ],
+          }
+          transient_patterns = {
+              "network_error": [
+                  "ConnectionError", "TimeoutError", "connection refused",
+                  "dns resolution", "network unreachable", "ssl error",
+                  "502", "503", "504", "Bad Gateway",
+              ],
+              "timeout": [
+                  "timeout", "timed out", "deadline exceeded",
+                  "ETIMEDOUT", "operation timed out",
+              ],
+          }
+          log_content = ""
+          if token and owner and repo:
+              import urllib.request, urllib.error
+              try:
+                  event_path = os.environ.get("GITHUB_EVENT_PATH", "")
+                  parent_run_id = ""
+                  if event_path and os.path.exists(event_path):
+                      with open(event_path) as f:
+                          event_data = json.load(f)
+                      parent_run_id = str(event_data.get("workflow_run", {}).get("id", ""))
+                  if parent_run_id:
+                      url = f"https://api.github.com/repos/{owner}/{repo}/actions/runs/{parent_run_id}/logs"
+                      req = urllib.request.Request(url, headers={
+                          "Authorization": f"Bearer {token}",
+                          "Accept": "application/vnd.github+json",
+                      })
+                      try:
+                          with urllib.request.urlopen(req, timeout=30) as r:
+                              content = r.read()
+                              if content[:2] == b"PK":
+                                  import zipfile, io
+                                  with zipfile.ZipFile(io.BytesIO(content)) as z:
+                                      texts = []
+                                      for name in z.namelist():
+                                          if name.endswith(".txt"):
+                                              texts.append(z.read(name).decode("utf-8", errors="replace"))
+                                      log_content = "\n".join(texts)[-5000:]
+                              else:
+                                  log_content = content.decode("utf-8", errors="replace")[-5000:]
+                      except Exception as e:
+                          print(f"Could not fetch parent logs: {e}")
+              except Exception as e:
+                  print(f"Event parsing error: {e}")
+          combined_text = (workflow_name + " " + log_content).lower()
+          for cat, patterns in transient_patterns.items():
+              for pattern in patterns:
+                  if pattern.lower() in combined_text:
+                      category = cat
+                      break
+              if category != "unknown":
+                  break
+          if category == "unknown":
+              for cat, patterns in fixable_patterns.items():
+                  for pattern in patterns:
+                      if pattern.lower() in combined_text:
+                          category = cat
+                          break
+                  if category != "unknown":
+                      break
+          fixable_categories = {"syntax_error", "auth_failure", "model_error"}
+          if category in fixable_categories:
+              is_fixable = "true"
+          elif category == "unknown":
+              is_fixable = "true"
+              category = "unknown_fixable"
+          else:
+              is_fixable = "false"
+          if analytics:
+              analytics.record_failure(
+                  provider="self_healing",
+                  error_message=f"workflow_failure:{workflow_name}",
+              )
+          print(f"  Failure Category: {category}")
+          print(f"  Is Fixable:       {is_fixable}")
+          print(f"  Workflow:         {workflow_name}")
+          with open(os.environ.get("GITHUB_OUTPUT", "/dev/null"), "a") as f:
+              f.write(f"category={category}\n")
+              f.write(f"is_fixable={is_fixable}\n")
+          report = {
+              "workflow_name": workflow_name,
+              "failure_category": category,
+              "is_fixable": is_fixable == "true",
+              "has_logs": bool(log_content),
+          }
+          os.makedirs("data", exist_ok=True)
+          with open("data/failure_categorization.json", "w") as f:
+              json.dump(report, f, indent=2)
+          print(json.dumps(report, indent=2))
+          ENDSCRIPT
+          python3 /tmp/_categorize.py
+
+      - name: Display Failure Category
+        run: |
+          echo "═══ Failure Categorization Result ═══"
+          echo "  Category:  ${{ steps.categorize-failure.outputs.category }}"
+          echo "  Fixable:   ${{ steps.categorize-failure.outputs.is_fixable }}"
+          if [ "${{ steps.categorize-failure.outputs.is_fixable }}" = "false" ]; then
+            echo "  ⏭ Skipping AutoDebugEngine — transient failure (will self-resolve)"
+          else
+            echo "  🔧 Proceeding with AutoDebugEngine — fixable failure detected"
+          fi
+
+      - name: Run AutoDebugEngine
+        if: steps.categorize-failure.outputs.is_fixable == 'true'
+        env:
+          GH_PAT_AUTOFIX:        ${{ secrets.GH_PAT_AUTOFIX }}
+          GH_REPO_OWNER:         ${{ secrets.GH_REPO_OWNER }}
+          GH_REPO_NAME:          ${{ secrets.GH_REPO_NAME }}
+          CEREBRAS_API_KEY_1:    ${{ secrets.CEREBRAS_API_KEY_1 }}
+          CEREBRAS_API_KEY_2:    ${{ secrets.CEREBRAS_API_KEY_2 }}
+          CEREBRAS_API_KEY_3:    ${{ secrets.CEREBRAS_API_KEY_3 }}
+          PORTKEY_API_KEY_1:     ${{ secrets.PORTKEY_API_KEY_1 }}
+          PORTKEY_GATEWAY_URL:   ${{ secrets.PORTKEY_GATEWAY_URL }}
+          CF_ACCOUNT_ID_1:       ${{ secrets.CF_ACCOUNT_ID_1 }}
+          CF_API_TOKEN_1:        ${{ secrets.CF_API_TOKEN_1 }}
+          CF_AI_GATEWAY_URL_1:   ${{ secrets.CF_AI_GATEWAY_URL_1 }}
+          CF_ACCOUNT_ID_2:       ${{ secrets.CF_ACCOUNT_ID_2 }}
+          CF_API_TOKEN_2:        ${{ secrets.CF_API_TOKEN_2 }}
+          CF_AI_GATEWAY_URL_2:   ${{ secrets.CF_AI_GATEWAY_URL_2 }}
+          CF_ACCOUNT_ID_3:       ${{ secrets.CF_ACCOUNT_ID_3 }}
+          CF_API_TOKEN_3:        ${{ secrets.CF_API_TOKEN_3 }}
+          CF_AI_GATEWAY_URL_3:   ${{ secrets.CF_AI_GATEWAY_URL_3 }}
+          CF_ACCOUNT_ID_4:       ${{ secrets.CF_ACCOUNT_ID_4 }}
+          CF_API_TOKEN_4:        ${{ secrets.CF_API_TOKEN_4 }}
+          CF_AI_GATEWAY_URL_4:   ${{ secrets.CF_AI_GATEWAY_URL_4 }}
+          CF_ACCOUNT_ID_5:       ${{ secrets.CF_ACCOUNT_ID_5 }}
+          CF_API_TOKEN_5:        ${{ secrets.CF_API_TOKEN_5 }}
+          CF_AI_GATEWAY_URL_5:   ${{ secrets.CF_AI_GATEWAY_URL_5 }}
+          CF_ACCOUNT_ID_6:       ${{ secrets.CF_ACCOUNT_ID_6 }}
+          CF_API_TOKEN_6:        ${{ secrets.CF_API_TOKEN_6 }}
+          CF_AI_GATEWAY_URL_6:   ${{ secrets.CF_AI_GATEWAY_URL_6 }}
+          CF_ACCOUNT_ID_7:       ${{ secrets.CF_ACCOUNT_ID_7 }}
+          CF_API_TOKEN_7:        ${{ secrets.CF_API_TOKEN_7 }}
+          CF_AI_GATEWAY_URL_7:   ${{ secrets.CF_AI_GATEWAY_URL_7 }}
+          CF_ACCOUNT_ID_8:       ${{ secrets.CF_ACCOUNT_ID_8 }}
+          CF_API_TOKEN_8:        ${{ secrets.CF_API_TOKEN_8 }}
+          CF_AI_GATEWAY_URL_8:   ${{ secrets.CF_AI_GATEWAY_URL_8 }}
+          CF_ACCOUNT_ID_9:       ${{ secrets.CF_ACCOUNT_ID_9 }}
+          CF_API_TOKEN_9:        ${{ secrets.CF_API_TOKEN_9 }}
+          CF_AI_GATEWAY_URL_9:   ${{ secrets.CF_AI_GATEWAY_URL_9 }}
+          CF_ACCOUNT_ID_10:      ${{ secrets.CF_ACCOUNT_ID_10 }}
+          CF_API_TOKEN_10:       ${{ secrets.CF_API_TOKEN_10 }}
+          CF_AI_GATEWAY_URL_10:  ${{ secrets.CF_AI_GATEWAY_URL_10 }}
+          CF_ACCOUNT_ID_11:      ${{ secrets.CF_ACCOUNT_ID_11 }}
+          CF_API_TOKEN_11:       ${{ secrets.CF_API_TOKEN_11 }}
+          CF_AI_GATEWAY_URL_11:  ${{ secrets.CF_AI_GATEWAY_URL_11 }}
+          GITHUB_RUN_ID:         ${{ github.run_id }}
+          GITHUB_REF_NAME:       ${{ github.ref_name }}
+        run: |
+          python -m torshield_ai_gateway.auto_debug \
+            "${{ github.event.workflow_run.name }}" \
+            "${{ github.event.workflow_run.id }}" \
+          || true
+
+      - name: Skip AutoDebug (Transient Failure)
+        if: steps.categorize-failure.outputs.is_fixable == 'false'
+        run: |
+          echo "⏭ AutoDebugEngine SKIPPED"
+          echo "Failure category '${{ steps.categorize-failure.outputs.category }}' is transient — will self-resolve"
+          echo "No automated patch will be applied"
+
+      - name: Report Outcome
+        if: always()
+        run: |
+          echo "Auto-debug completed for: ${{ github.event.workflow_run.name }}"
+          echo "Original run ID: ${{ github.event.workflow_run.id }}"
+          echo "Conclusion: ${{ github.event.workflow_run.conclusion }}"
+          echo "Failure category: ${{ steps.categorize-failure.outputs.category }}"
+          echo "Was fixable: ${{ steps.categorize-failure.outputs.is_fixable }}"
+
+      - name: Upload Categorization Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failure-categorization-${{ github.run_id }}
+          path: data/failure_categorization.json
+          retention-days: 7
+          if-no-files-found: ignore

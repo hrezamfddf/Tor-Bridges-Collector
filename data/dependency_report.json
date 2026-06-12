@@ -1,0 +1,367 @@
+{
+  "python": {
+    "language": "python",
+    "files_checked": [
+      "requirements.txt"
+    ],
+    "packages": [
+      {
+        "name": "requests",
+        "import_name": "requests",
+        "importable": true,
+        "installed_version": "2.32.5",
+        "version_compatible": true,
+        "issues": [],
+        "source_file": "requirements.txt",
+        "source_line": 5
+      },
+      {
+        "name": "beautifulsoup4",
+        "import_name": "bs4",
+        "importable": true,
+        "installed_version": "4.14.3",
+        "version_compatible": true,
+        "issues": [],
+        "source_file": "requirements.txt",
+        "source_line": 6
+      },
+      {
+        "name": "lxml",
+        "import_name": "lxml",
+        "importable": true,
+        "installed_version": "6.0.2",
+        "version_compatible": true,
+        "issues": [],
+        "source_file": "requirements.txt",
+        "source_line": 7
+      },
+      {
+        "name": "aiohttp",
+        "import_name": "aiohttp",
+        "importable": true,
+        "installed_version": "3.13.3",
+        "version_compatible": true,
+        "issues": [],
+        "source_file": "requirements.txt",
+        "source_line": 10
+      },
+      {
+        "name": "scikit-learn",
+        "import_name": "sklearn",
+        "importable": true,
+        "installed_version": "1.5.2",
+        "version_compatible": true,
+        "issues": [],
+        "source_file": "requirements.txt",
+        "source_line": 13
+      },
+      {
+        "name": "numpy",
+        "import_name": "numpy",
+        "importable": true,
+        "installed_version": "2.1.3",
+        "version_compatible": true,
+        "issues": [],
+        "source_file": "requirements.txt",
+        "source_line": 14
+      },
+      {
+        "name": "aioquic",
+        "import_name": "aioquic",
+        "importable": false,
+        "installed_version": null,
+        "version_compatible": null,
+        "issues": [
+          "Package aioquic (import as aioquic) is not installed"
+        ],
+        "source_file": "requirements.txt",
+        "source_line": 18
+      },
+      {
+        "name": "cryptography",
+        "import_name": "cryptography",
+        "importable": true,
+        "installed_version": "44.0.3",
+        "version_compatible": true,
+        "issues": [],
+        "source_file": "requirements.txt",
+        "source_line": 21
+      },
+      {
+        "name": "pycryptodome",
+        "import_name": "Crypto",
+        "importable": true,
+        "installed_version": "3.23.0",
+        "version_compatible": true,
+        "issues": [],
+        "source_file": "requirements.txt",
+        "source_line": 25
+      },
+      {
+        "name": "rich",
+        "import_name": "rich",
+        "importable": true,
+        "installed_version": "14.3.3",
+        "version_compatible": true,
+        "issues": [],
+        "source_file": "requirements.txt",
+        "source_line": 28
+      },
+      {
+        "name": "pyyaml",
+        "import_name": "yaml",
+        "importable": true,
+        "installed_version": "6.0.3",
+        "version_compatible": true,
+        "issues": [],
+        "source_file": "requirements.txt",
+        "source_line": 31
+      },
+      {
+        "name": "ruff",
+        "import_name": "ruff",
+        "importable": false,
+        "installed_version": null,
+        "version_compatible": null,
+        "issues": [
+          "Package ruff (import as ruff) is not installed"
+        ],
+        "source_file": "requirements.txt",
+        "source_line": 34
+      },
+      {
+        "name": "mypy",
+        "import_name": "mypy",
+        "importable": false,
+        "installed_version": null,
+        "version_compatible": null,
+        "issues": [
+          "Package mypy (import as mypy) is not installed"
+        ],
+        "source_file": "requirements.txt",
+        "source_line": 35
+      },
+      {
+        "name": "pytest",
+        "import_name": "pytest",
+        "importable": true,
+        "installed_version": "9.0.2",
+        "version_compatible": true,
+        "issues": [],
+        "source_file": "requirements.txt",
+        "source_line": 38
+      },
+      {
+        "name": "pytest-cov",
+        "import_name": "pytest_cov",
+        "importable": true,
+        "installed_version": "7.0.0",
+        "version_compatible": true,
+        "issues": [],
+        "source_file": "requirements.txt",
+        "source_line": 39
+      },
+      {
+        "name": "pytest-asyncio",
+        "import_name": "pytest_asyncio",
+        "importable": true,
+        "installed_version": "1.3.0",
+        "version_compatible": true,
+        "issues": [],
+        "source_file": "requirements.txt",
+        "source_line": 40
+      },
+      {
+        "name": "dnspython",
+        "import_name": "dns",
+        "importable": true,
+        "installed_version": "2.8.0",
+        "version_compatible": true,
+        "issues": [],
+        "source_file": "requirements.txt",
+        "source_line": 44
+      },
+      {
+        "name": "dpkt",
+        "import_name": "dpkt",
+        "importable": false,
+        "installed_version": null,
+        "version_compatible": null,
+        "issues": [
+          "Package dpkt (import as dpkt) is not installed"
+        ],
+        "source_file": "requirements.txt",
+        "source_line": 46
+      }
+    ],
+    "summary": {
+      "total": 18,
+      "importable": 14,
+      "not_importable": 4,
+      "version_mismatches": 0
+    }
+  },
+  "go": {
+    "language": "go",
+    "files_checked": [
+      "go.mod",
+      "go_tester/go.mod"
+    ],
+    "modules": [
+      {
+        "file": "go.mod",
+        "module_path": "github.com/hrrjruruufgbbvhrh/Tor-Bridges-Collector-Ultra",
+        "go_version": "1.22",
+        "path_valid": true,
+        "dependencies": [],
+        "issues": []
+      },
+      {
+        "file": "go_tester/go.mod",
+        "module_path": "github.com/user/tor-bridge-tester",
+        "go_version": "1.21",
+        "path_valid": true,
+        "dependencies": [],
+        "issues": []
+      }
+    ],
+    "summary": {
+      "total": 2,
+      "valid_path": 2,
+      "invalid_path": 0,
+      "missing_dependencies": 0
+    }
+  },
+  "rust": {
+    "language": "rust",
+    "files_checked": [
+      "bridge-probe/Cargo.toml"
+    ],
+    "packages": [
+      {
+        "file": "bridge-probe/Cargo.toml",
+        "package": {
+          "name": "bridge-probe",
+          "version": "2.0.0",
+          "edition": "2021",
+          "description": "TorShield-IR pluggable-transport handshake prober — Iran-optimised",
+          "authors": "[\"TorShield-IR Contributors\"]"
+        },
+        "dependencies": [
+          {
+            "name": "tokio",
+            "version": "1",
+            "features": [
+              "full",
+              "process"
+            ],
+            "optional": false,
+            "issues": []
+          },
+          {
+            "name": "serde",
+            "version": "1",
+            "features": [
+              "derive"
+            ],
+            "optional": false,
+            "issues": []
+          },
+          {
+            "name": "serde_json",
+            "version": "1",
+            "features": [],
+            "optional": false,
+            "issues": []
+          },
+          {
+            "name": "clap",
+            "version": ">=4.5.0, <4.6",
+            "features": [
+              "derive"
+            ],
+            "optional": false,
+            "issues": []
+          },
+          {
+            "name": "clap_lex",
+            "version": ">=0.7.0, <1.0",
+            "features": [],
+            "optional": false,
+            "issues": []
+          },
+          {
+            "name": "tracing",
+            "version": "0.1",
+            "features": [],
+            "optional": false,
+            "issues": []
+          },
+          {
+            "name": "tracing-subscriber",
+            "version": "0.3",
+            "features": [
+              "env-filter",
+              "fmt"
+            ],
+            "optional": false,
+            "issues": []
+          },
+          {
+            "name": "anyhow",
+            "version": "1",
+            "features": [],
+            "optional": false,
+            "issues": []
+          },
+          {
+            "name": "regex",
+            "version": "1",
+            "features": [],
+            "optional": false,
+            "issues": []
+          }
+        ],
+        "issues": []
+      }
+    ],
+    "summary": {
+      "total": 9,
+      "with_version": 9,
+      "without_version": 0,
+      "issues": 0
+    }
+  },
+  "zig": {
+    "language": "zig",
+    "files_checked": [
+      "zig-scanner/build.zig"
+    ],
+    "packages": [
+      {
+        "file": "zig-scanner/build.zig",
+        "has_build_function": true,
+        "links_libc": true,
+        "dependencies": [],
+        "issues": []
+      }
+    ],
+    "summary": {
+      "total": 1,
+      "has_dependencies": 0,
+      "issues": 0
+    }
+  },
+  "overall_summary": {
+    "total_issues": 4,
+    "python_packages_total": 18,
+    "python_packages_importable": 14,
+    "python_packages_missing": 4,
+    "python_version_mismatches": 0,
+    "go_modules_valid": 2,
+    "go_modules_invalid": 0,
+    "rust_deps_with_version": 9,
+    "rust_deps_no_version": 0,
+    "zig_packages_checked": 1
+  }
+}

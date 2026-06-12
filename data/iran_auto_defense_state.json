@@ -1,0 +1,16 @@
+{
+  "cycle_count": 3,
+  "bridge_scores": {
+    "obfs4 192.0.2.1:443 cert=abc123 iat-mode=2": 0.415,
+    "webtunnel 192.0.2.2:443 url=https://arvancloud.ir/... ver=0.0.1": 0.97,
+    "snowflake 192.0.2.3:443 fingerprint=def456 url=https://broker.torproject.org": 0.88,
+    "meek_lite 192.0.2.4:443 url=https://azureedge.net/ front=azureedge.net": 0.78,
+    "obfs4 192.0.2.5:9001 cert=ghi789": 0.235
+  },
+  "transport_state": {
+    "current_transport": "webtunnel",
+    "last_switch_ts": 1781213956.579703,
+    "switch_count": 1
+  },
+  "last_updated": "2026-06-11T21:39:44.966257+00:00"
+}
