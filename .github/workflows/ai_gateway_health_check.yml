@@ -193,19 +193,16 @@ jobs:
           PORTKEY_API_KEY_3: ${{ secrets.PORTKEY_API_KEY_3 }}
         run: |
           cat > /tmp/_model_rankings.py << 'ENDSCRIPT'
-          import sys, os, asyncio
+          import sys, os
           sys.path.insert(0, ".")
           try:
               from torshield_ai_gateway.dynamic_model_brain import DynamicModelBrain
               brain = DynamicModelBrain()
-              asyncio.run(brain.refresh())
+              brain.refresh()  # Fix-17.0: sync, no asyncio needed
               print("=== LIVE Dynamic Model Rankings ===")
               print(f"Total fetched: {brain.summary()['total_models']} models")
               for task in ["general", "reasoning", "coding", "vision", "fast"]:
-                  loop = asyncio.new_event_loop()
-                  top = loop.run_until_complete(
-                      brain.get_top_cf_hosted_models(task=task, top_n=3)
-                  )
+                  top = brain.get_top_cf_hosted_models(task=task, top_n=3)
                   print(f"\n[{task}] top-3 (LIVE):")
                   for i, m in enumerate(top):
                       print(f"  #{i+1} {m.id}  score={m.score}  "
@@ -252,6 +249,8 @@ jobs:
           PORTKEY_API_KEY_2:     ${{ secrets.PORTKEY_API_KEY_2 }}
           PORTKEY_API_KEY_3:     ${{ secrets.PORTKEY_API_KEY_3 }}
           PORTKEY_GATEWAY_URL:   ${{ secrets.PORTKEY_GATEWAY_URL }}
+          PORTKEY_PROVIDER_KEY:  ${{ secrets.PORTKEY_PROVIDER_KEY }}
+          PORTKEY_HEALTH_MODEL:  ${{ secrets.PORTKEY_HEALTH_MODEL }}
           CEREBRAS_API_KEY_1:    ${{ secrets.CEREBRAS_API_KEY_1 }}
           CEREBRAS_API_KEY_2:    ${{ secrets.CEREBRAS_API_KEY_2 }}
           CEREBRAS_API_KEY_3:    ${{ secrets.CEREBRAS_API_KEY_3 }}

@@ -888,8 +888,20 @@ class PortkeyProvider(_BaseProvider):
         elif key:
             # Generic alphanumeric key (e.g. g8V...qTF) — try as Bearer with
             # x-portkey-api-key header. Real Portkey keys may not have a prefix.
+            # BUG-4 FIX: Also add provider routing headers for Cerebras.
+            # Portkey cannot resolve model IDs without knowing which provider
+            # to route to. x-portkey-provider tells Portkey to use Cerebras.
             headers["Authorization"] = f"Bearer {key}"
             headers["x-portkey-api-key"] = key
+            # BUG-4 FIX: Add provider routing header
+            provider_key = os.environ.get("PORTKEY_PROVIDER_KEY", "").strip()
+            if provider_key:
+                headers["x-portkey-provider"] = "cerebras"
+                headers["Authorization"] = f"Bearer {provider_key}"
+                logger.debug(
+                    f"[Portkey] slot {slot} Using PORTKEY_PROVIDER_KEY "
+                    f"with x-portkey-provider=cerebras"
+                )
             logger.debug(
                 f"[Portkey] slot {slot} Using generic key "
                 f"(starts with '{key[:4]}...') — attempting Bearer + x-portkey-api-key auth."
@@ -982,8 +994,21 @@ class PortkeyProvider(_BaseProvider):
                     )
             except Exception as exc:
                 logger.debug(f"[Portkey] Brain model fetch failed: {exc}")
-        chosen_model   = explicit_model or self.DEFAULT_MODEL
-        models_to_try  = [chosen_model] + [m for m in self.PORTKEY_MODELS if m != chosen_model]
+
+        # BUG-4 FIX: Use PORTKEY_HEALTH_MODEL for Portkey requests.
+        # Portkey cannot resolve "@cf/…" model IDs — it needs a
+        # Cerebras-compatible model ID + provider routing headers.
+        PORTKEY_HEALTH_MODEL = os.environ.get(
+            "PORTKEY_HEALTH_MODEL", "llama-3.3-70b"
+        )
+        chosen_model   = explicit_model or PORTKEY_HEALTH_MODEL
+        # BUG-4 FIX: Build model list with Cerebras-compatible IDs only
+        portkey_models = [
+            PORTKEY_HEALTH_MODEL,
+            "llama3.1-8b",
+            "llama3.1-70b",
+        ]
+        models_to_try  = [chosen_model] + [m for m in portkey_models if m != chosen_model]
 
         slot      = self.rotator.get_primary()
         fallbacks = [slot] + self.rotator.get_fallback_chain(slot.index)
@@ -1855,6 +1880,7 @@ class CloudflareAIGatewayProvider(_BaseProvider):
         last_auth_error = None
         for attempt, s in enumerate(fallbacks):
             last_err = None
+            bad_req_count = 0  # BUG-3 FIX: Track 400s per slot
 
             # Skip dead slots (slots that previously returned 400+empty body)
             with self._dead_slots_lock:
@@ -1872,12 +1898,17 @@ class CloudflareAIGatewayProvider(_BaseProvider):
                     continue
 
             for m in models_to_try:
-                # Skip models that already 400'd on a previous slot
-                if m in self._failed_models:
-                    logger.debug(
-                        f"[CF-AI-GW] Skipping model {m} — previously 400'd on another slot"
-                    )
-                    continue
+                # BUG-3 FIX: Skip models that 400'd on THIS slot only.
+                # Do NOT use a global _failed_models set — different slots
+                # may support different models. Only skip if the model 400'd
+                # on the SAME slot we're about to try.
+                if hasattr(self, '_slot_failed_models'):
+                    if (s.index, m) in self._slot_failed_models:
+                        logger.debug(
+                            f"[CF-AI-GW] Skipping model {m} on slot {s.index} "
+                            f"— previously 400'd on this same slot"
+                        )
+                        continue
 
                 try:
                     # Sanitize credentials
@@ -1911,6 +1942,8 @@ class CloudflareAIGatewayProvider(_BaseProvider):
                     self.circuit_breaker.record_success()
                     return CloudflareWorkersAIProvider._extract_cf_content(resp)
                 except BadRequestError as e:
+                    bad_req_count += 1  # BUG-3 FIX: Track per-slot
+                    last_err = e  # BUG-3 FIX: Set last_err so slot failure is handled
                     # HTTP 400 — NOT an auth failure. Check if empty body (dead slot)
                     # or model-specific issue (try next model).
                     err_msg = str(e)
@@ -1924,13 +1957,15 @@ class CloudflareAIGatewayProvider(_BaseProvider):
                                     f"skipping all remaining models for this slot"
                                 )
                         break  # Stop trying models for this slot
-                    # Model-specific issue — add to failed set and try next model
-                    self._failed_models.add(m)
+                    # BUG-3 FIX: Track per-slot model failures (not global)
+                    if not hasattr(self, '_slot_failed_models'):
+                        self._slot_failed_models = set()
+                    self._slot_failed_models.add((s.index, m))
                     logger.debug(
                         f"[CF-AI-GW] slot {s.index} model {m} → "
                         f"BadRequestError: {err_msg[:200]}"
                     )
-                    continue
+                    continue  # Try next model on THIS slot
                 except urllib.error.HTTPError as e:
                     last_err = e
                     if e.code in (403, 401):
@@ -1944,7 +1979,9 @@ class CloudflareAIGatewayProvider(_BaseProvider):
                     # NOTE: 400 is now caught as BadRequestError above, not here
                     if e.code == 404:
                         logger.debug(f"[CF-AI-GW] Model not found: {m}")
-                        self._failed_models.add(m)
+                        if not hasattr(self, '_slot_failed_models'):
+                            self._slot_failed_models = set()
+                        self._slot_failed_models.add((s.index, m))
                         continue
                     logger.warning(
                         f"[CF-AI-GW] slot {s.index} "
@@ -1953,8 +1990,20 @@ class CloudflareAIGatewayProvider(_BaseProvider):
                     self.circuit_breaker.record_failure()
                     raise
 
+            # BUG-3 FIX: After trying all models for a slot,
+            # handle the result properly — mark failure and continue
+            # to the NEXT slot. NEVER raise here — always try next slot.
+            if bad_req_count > 0 and bad_req_count == len(models_to_try):
+                logger.warning(
+                    f"[CF-AI-GW] slot {s.index} — all {len(models_to_try)} "
+                    f"models returned 400, moving to next slot"
+                )
+                self.rotator.mark_failure(s)
+                self.circuit_breaker.record_failure()
+                continue  # ← Always continue to next slot
+
             if last_err:
-                if last_err.code in (403, 401):
+                if isinstance(last_err, (urllib.error.HTTPError,)) and last_err.code in (403, 401):
                     self.rotator.mark_failure(s)
                     continue  # Try next slot
                 logger.warning(f"[CF-AI-GW] slot {s.index} all models failed")
