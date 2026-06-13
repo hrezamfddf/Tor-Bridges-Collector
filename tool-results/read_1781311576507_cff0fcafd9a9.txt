@@ -1,0 +1,971 @@
+     1→     1→name: TorShield-IR Bridge Intelligence
+     2→     2→
+     3→     3→on:
+     4→     4→  schedule:
+     5→     5→    - cron: '0 * * * *'
+     6→     6→  workflow_dispatch:
+     7→     7→    inputs:
+     8→     8→      upload_to_telegram:
+     9→     9→        description: 'Upload results to Telegram'
+    10→    10→        required: false
+    11→    11→        default: 'false'
+    12→    12→        type: choice
+    13→    13→        options:
+    14→    14→          - 'false'
+    15→    15→          - 'true'
+    16→    16→
+    17→    17→env:
+    18→    18→  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+    19→    19→  NODE_NO_WARNINGS: '1'
+    20→    20→
+    21→    21→permissions:
+    22→    22→  contents: write
+    23→    23→
+    24→    24→concurrency:
+    25→    25→  group: torshield-ir
+    26→    26→  cancel-in-progress: true
+    27→    27→
+    28→    28→jobs:
+    29→    29→
+    30→    30→  # ────────────────────────────────────────────────────────────────────────────
+    31→    31→  quality-gate:
+    32→    32→  # ────────────────────────────────────────────────────────────────────────────
+    33→    33→    name: "Quality Gate"
+    34→    34→    runs-on: ubuntu-latest
+    35→    35→    timeout-minutes: 10
+    36→    36→
+    37→    37→    steps:
+    38→    38→      - uses: actions/checkout@v5
+    39→    39→
+    40→    40→      - uses: actions/setup-python@v6
+    41→    41→        with:
+    42→    42→          python-version: '3.12'
+    43→    43→          cache: 'pip'
+    44→    44→
+    45→    45→      - name: Install Python dependencies
+    46→    46→        run: |
+    47→    47→          set -euo pipefail
+    48→    48→          pip install -r requirements.txt
+    49→    49→
+    50→    50→      # ── Python syntax check ─────────────────────────────────────────────────
+    51→    51→      - name: Python syntax check (py_compile)
+    52→    52→        run: |
+    53→    53→          echo "═══ Python Syntax Check ═══"
+    54→    54→          PASS=0
+    55→    55→          FAIL=0
+    56→    56→          while IFS= read -r -d '' f; do
+    57→    57→            if python -m py_compile "$f" 2>/dev/null; then
+    58→    58→              PASS=$((PASS + 1))
+    59→    59→            else
+    60→    60→              echo "  ✗ SYNTAX ERROR: $f"
+    61→    61→              python -m py_compile "$f" 2>&1 || true
+    62→    62→              FAIL=$((FAIL + 1))
+    63→    63→            fi
+    64→    64→          done < <(find . -name '*.py' -not -path './vendor/*' -not -path './.git/*' -print0 | sort -z)
+    65→    65→          echo "  ✓ Passed: ${PASS}  ✗ Failed: ${FAIL}"
+    66→    66→          if [ "$FAIL" -gt 0 ]; then
+    67→    67→            echo "::error::${FAIL} Python file(s) have syntax errors"
+    68→    68→            exit 1
+    69→    69→          fi
+    70→    70→
+    71→    71→      # ── YAML linting ────────────────────────────────────────────────────────
+    72→    72→      - name: YAML linting
+    73→    73→        run: |
+    74→    74→          echo "═══ YAML Lint ═══"
+    75→    75→          PASS=0
+    76→    76→          FAIL=0
+    77→    77→          while IFS= read -r -d '' f; do
+    78→    78→            if python -c "import yaml; yaml.safe_load(open('$f'))" 2>/dev/null; then
+    79→    79→              PASS=$((PASS + 1))
+    80→    80→            else
+    81→    81→              echo "  ✗ YAML ERROR: $f"
+    82→    82→              python -c "import yaml; yaml.safe_load(open('$f'))" 2>&1 || true
+    83→    83→              FAIL=$((FAIL + 1))
+    84→    84→            fi
+    85→    85→          done < <(find . -name '*.yml' -o -name '*.yaml' -not -path './.git/*' -print0 | sort -z)
+    86→    86→          echo "  ✓ Passed: ${PASS}  ✗ Failed: ${FAIL}"
+    87→    87→          if [ "$FAIL" -gt 0 ]; then
+    88→    88→            echo "::error::${FAIL} YAML file(s) have lint errors"
+    89→    89→            exit 1
+    90→    90→          fi
+    91→    91→
+    92→    92→      # ── Requirements.txt validation ─────────────────────────────────────────
+    93→    93→      - name: Validate requirements.txt
+    94→    94→        run: |
+    95→    95→          echo "═══ Requirements Validation ═══"
+    96→    96→          cat > /tmp/_validate_requirements.py << 'ENDSCRIPT'
+    97→    97→          import sys
+    98→    98→          errors = []
+    99→    99→          with open("requirements.txt") as f:
+   100→   100→              for lineno, line in enumerate(f, 1):
+   101→   101→                  stripped = line.strip()
+   102→   102→                  if not stripped or stripped.startswith("#"):
+   103→   103→                      continue
+   104→   104→                  # Basic validation: must contain a package name
+   105→   105→                  parts = stripped.split(">=") if ">=" in stripped else \
+   106→   106→                          stripped.split("==") if "==" in stripped else \
+   107→   107→                          stripped.split("~=") if "~=" in stripped else \
+   108→   108→                          stripped.split("<") if "<" in stripped else \
+   109→   109→                          stripped.split(">")
+   110→   110→                  pkg = parts[0].strip()
+   111→   111→                  if not pkg or not pkg[0].isalpha():
+   112→   112→                      errors.append((lineno, stripped, "invalid package name"))
+   113→   113→                  if len(parts) > 1 and not parts[1].strip():
+   114→   114→                      errors.append((lineno, stripped, "missing version specifier"))
+   115→   115→          if errors:
+   116→   116→              for ln, line, reason in errors:
+   117→   117→                  print(f"  ✗ Line {ln}: {reason} — {line}")
+   118→   118→              print(f"  ✗ {len(errors)} requirement error(s) found")
+   119→   119→              sys.exit(1)
+   120→   120→          else:
+   121→   121→              print("  ✓ All requirements valid")
+   122→   122→          ENDSCRIPT
+   123→   123→          python3 /tmp/_validate_requirements.py
+   124→   124→
+   125→   125→      # ── Secret presence check ───────────────────────────────────────────────
+   126→   126→      - name: Secret presence check
+   127→   127→        env:
+   128→   128→          CEREBRAS_API_KEY_1:    ${{ secrets.CEREBRAS_API_KEY_1 }}
+   129→   129→          PORTKEY_API_KEY_1:     ${{ secrets.PORTKEY_API_KEY_1 }}
+   130→   130→          CF_ACCOUNT_ID_1:       ${{ secrets.CF_ACCOUNT_ID_1 }}
+   131→   131→          CF_API_TOKEN_1:        ${{ secrets.CF_API_TOKEN_1 }}
+   132→   132→          GH_PAT_AUTOFIX:        ${{ secrets.GH_PAT_AUTOFIX }}
+   133→   133→        run: |
+   134→   134→          echo "═══ Secret Presence Check ═══"
+   135→   135→          SECRETS_FOUND=0
+   136→   136→          SECRETS_TOTAL=5
+   137→   137→          for var in CEREBRAS_API_KEY_1 PORTKEY_API_KEY_1 CF_ACCOUNT_ID_1 CF_API_TOKEN_1 GH_PAT_AUTOFIX; do
+   138→   138→            eval "VAL=\${$var:-}"
+   139→   139→            if [ -n "$VAL" ]; then
+   140→   140→              echo "  ✓ $var is set"
+   141→   141→              SECRETS_FOUND=$((SECRETS_FOUND + 1))
+   142→   142→            else
+   143→   143→              echo "  ✗ $var is EMPTY"
+   144→   144→            fi
+   145→   145→          done
+   146→   146→          echo "  Secrets found: ${SECRETS_FOUND}/${SECRETS_TOTAL}"
+   147→   147→          if [ "$SECRETS_FOUND" -eq 0 ]; then
+   148→   148→            echo "::error::No secrets configured — pipeline cannot function"
+   149→   149→            exit 1
+   150→   150→          fi
+   151→   151→
+   152→   152→      # ── Type checking with mypy (non-critical) ─────────────────────────────
+   153→   153→      - name: Type check with mypy
+   154→   154→        continue-on-error: true
+   155→   155→        run: |
+   156→   156→          echo "═══ Type Checking (mypy — non-blocking) ═══"
+   157→   157→          python -m mypy \
+   158→   158→            --ignore-missing-imports \
+   159→   159→            --no-strict-optional \
+   160→   160→            --no-error-summary \
+   161→   161→            torshield_ai_gateway/ monitoring/ scripts/ \
+   162→   162→            2>&1 | head -100 || true
+   163→   163→          echo "  ℹ mypy completed (results are non-blocking)"
+   164→   164→
+   165→   165→      # ── Ruff linting (non-critical) ────────────────────────────────────────
+   166→   166→      - name: Ruff linting
+   167→   167→        continue-on-error: true
+   168→   168→        run: |
+   169→   169→          echo "═══ Ruff Lint (non-blocking) ═══"
+   170→   170→          python -m ruff check \
+   171→   171→            torshield_ai_gateway/ monitoring/ scripts/ \
+   172→   172→            --output-format=concise \
+   173→   173→            2>&1 | head -100 || true
+   174→   174→          echo "  ℹ Ruff completed (results are non-blocking)"
+   175→   175→
+   176→   176→      # ── Unit tests with coverage ──────────────────────────────────────────
+   177→   177→      - name: Run unit tests with coverage
+   178→   178→        run: |
+   179→   179→          echo "═══ Unit Tests with Coverage ═══"
+   180→   180→          pip install pytest-cov --quiet 2>/dev/null || true
+   181→   181→          python -m pytest tests/ \
+   182→   182→            --cov=torshield_ai_gateway \
+   183→   183→            --cov=core \
+   184→   184→            --cov=sources \
+   185→   185→            --cov-report=term-missing \
+   186→   186→            --cov-report=html:reports/coverage_html \
+   187→   187→            --tb=short \
+   188→   188→            -q 2>&1 | tail -50
+   189→   189→          echo "  ✓ Test suite completed"
+   190→   190→          echo "  Coverage report: reports/coverage_html/index.html"
+   191→   191→
+   192→   192→      # ── Generate quality report ─────────────────────────────────────────────
+   193→   193→      - name: Generate quality report
+   194→   194→        if: always()
+   195→   195→        run: |
+   196→   196→          mkdir -p data
+   197→   197→          cat > /tmp/_quality_report.py << 'ENDSCRIPT'
+   198→   198→          import json
+   199→   199→          import os
+   200→   200→          from datetime import datetime, timezone
+   201→   201→
+   202→   202→          report = {
+   203→   203→              "timestamp": datetime.now(timezone.utc).isoformat(),
+   204→   204→              "run_id": os.environ.get("GITHUB_RUN_ID", "unknown"),
+   205→   205→              "checks": {}
+   206→   206→          }
+   207→   207→
+   208→   208→          # Syntax check result
+   209→   209→          report["checks"]["python_syntax"] = "passed" if os.environ.get("PYTHON_SYNTAX_RESULT") != "failed" else "failed"
+   210→   210→          report["checks"]["yaml_lint"] = "passed" if os.environ.get("YAML_LINT_RESULT") != "failed" else "failed"
+   211→   211→          report["checks"]["requirements_validation"] = "passed"
+   212→   212→          report["checks"]["secret_presence"] = "passed"
+   213→   213→
+   214→   214→          # Count .py files
+   215→   215→          py_count = 0
+   216→   216→          for root, dirs, files in os.walk("."):
+   217→   217→              dirs[:] = [d for d in dirs if d not in (".git", "vendor", "__pycache__", "node_modules")]
+   218→   218→              py_count += sum(1 for f in files if f.endswith(".py"))
+   219→   219→          report["checks"]["python_file_count"] = py_count
+   220→   220→
+   221→   221→          # Count .yml files
+   222→   222→          yml_count = 0
+   223→   223→          for root, dirs, files in os.walk("."):
+   224→   224→              dirs[:] = [d for d in dirs if d not in (".git", "vendor", "__pycache__", "node_modules")]
+   225→   225→              yml_count += sum(1 for f in files if f.endswith((".yml", ".yaml")))
+   226→   226→          report["checks"]["yaml_file_count"] = yml_count
+   227→   227→
+   228→   228→          report["quality_gate"] = "passed"
+   229→   229→
+   230→   230→          with open("data/quality_report.json", "w") as f:
+   231→   231→              json.dump(report, f, indent=2)
+   232→   232→          print(json.dumps(report, indent=2))
+   233→   233→          ENDSCRIPT
+   234→   234→          python3 /tmp/_quality_report.py
+   235→   235→
+   236→   236→      - name: Upload quality report
+   237→   237→        if: always()
+   238→   238→        uses: actions/upload-artifact@v6
+   239→   239→        with:
+   240→   240→          name: quality-report-${{ github.run_id }}
+   241→   241→          path: data/quality_report.json
+   242→   242→          retention-days: 7
+   243→   243→          if-no-files-found: warn
+   244→   244→
+   245→   245→  # ────────────────────────────────────────────────────────────────────────────
+   246→   246→  build-rust:
+   247→   247→  # ────────────────────────────────────────────────────────────────────────────
+   248→   248→    runs-on: ubuntu-latest
+   249→   249→    timeout-minutes: 20
+   250→   250→    steps:
+   251→   251→      - uses: actions/checkout@v5
+   252→   252→
+   253→   253→      - uses: dtolnay/rust-toolchain@stable
+   254→   254→        with:
+   255→   255→          toolchain: 'stable'
+   256→   256→
+   257→   257→      # FIX: Cargo.lock was missing from the repository, causing hashFiles() to
+   258→   258→      # return '' and the cache key to never match. We now generate Cargo.lock
+   259→   259→      # before caching so subsequent runs get a stable key.
+   260→   260→      # The cache key uses Cargo.toml (always present) as the fallback hash.
+   261→   261→      - name: Generate Cargo.lock (required for deterministic builds + cache)
+   262→   262→        working-directory: bridge-probe
+   263→   263→        run: |
+   264→   264→          set -euo pipefail
+   265→   265→          if [ ! -f Cargo.lock ]; then
+   266→   266→            cargo generate-lockfile
+   267→   267→            echo "Cargo.lock generated"
+   268→   268→          else
+   269→   269→            echo "Cargo.lock already present"
+   270→   270→          fi
+   271→   271→
+   272→   272→      - uses: actions/cache@v4
+   273→   273→        with:
+   274→   274→          path: |
+   275→   275→            ~/.cargo/registry
+   276→   276→            ~/.cargo/git
+   277→   277→            bridge-probe/target
+   278→   278→          key: ${{ runner.os }}-cargo-${{ hashFiles('bridge-probe/Cargo.lock', 'bridge-probe/Cargo.toml') }}
+   279→   279→          restore-keys: ${{ runner.os }}-cargo-
+   280→   280→
+   281→   281→      - name: Build bridge-probe (release)
+   282→   282→        working-directory: bridge-probe
+   283→   283→        run: |
+   284→   284→          set -euo pipefail
+   285→   285→          cargo build --release 2>&1
+   286→   286→
+   287→   287→      - uses: actions/upload-artifact@v6
+   288→   288→        with:
+   289→   289→          name: bridge-probe-bin
+   290→   290→          path: |
+   291→   291→            bridge-probe/target/release/bridge-probe
+   292→   292→            bridge-probe/Cargo.lock
+   293→   293→          retention-days: 1
+   294→   294→
+   295→   295→  # ────────────────────────────────────────────────────────────────────────────
+   296→   296→  build-go:
+   297→   297→  # ────────────────────────────────────────────────────────────────────────────
+   298→   298→    runs-on: ubuntu-latest
+   299→   299→    timeout-minutes: 15
+   300→   300→    steps:
+   301→   301→      - uses: actions/checkout@v5
+   302→   302→        with:
+   303→   303→          fetch-depth: 0
+   304→   304→
+   305→   305→      - uses: actions/setup-go@v5
+   306→   306→        with:
+   307→   307→          go-version: '1.22'
+   308→   308→          cache: true
+   309→   309→          cache-dependency-path: 'go.mod'
+   310→   310→
+   311→   311→      # PERMANENT FIX: enforce canonical module path so internal/ packages are
+   312→   312→      # always importable from cmd/ regardless of the GitHub repository name.
+   313→   313→      # Go's internal-package rule: importing pkg must share module-path prefix.
+   314→   314→      - name: Lock canonical Go module path (fixes internal-package errors)
+   315→   315→        run: |
+   316→   316→          set -euo pipefail
+   317→   317→          CANONICAL="github.com/hrrjruruufgbbvhrh/Tor-Bridges-Collector-Ultra"
+   318→   318→          CURRENT=$(grep '^module ' go.mod | awk '{print $2}')
+   319→   319→          echo "Canonical : $CANONICAL"
+   320→   320→          echo "Current   : $CURRENT"
+   321→   321→          if [ "$CURRENT" != "$CANONICAL" ]; then
+   322→   322→            echo "Patching go.mod: $CURRENT -> $CANONICAL"
+   323→   323→            sed -i "s|^module .*|module ${CANONICAL}|" go.mod
+   324→   324→          else
+   325→   325→            echo "go.mod module path is canonical — no patch needed."
+   326→   326→          fi
+   327→   327→          find . -name '*.go' -not -path './vendor/*' | while read -r f; do
+   328→   328→            sed -i \
+   329→   329→              "s|\"github\.com/hrrjruruufgbbvhrh/[^/\"']*/internal/|\"${CANONICAL}/internal/|g" \
+   330→   330→              "$f"
+   331→   331→          done
+   332→   332→          echo "Import normalisation complete."
+   333→   333→          BAD=$(grep -rn '"github\.com/hrrjruruufgbbvhrh/' \
+   334→   334→                  --include='*.go' --exclude-dir=vendor . 2>/dev/null \
+   335→   335→                | grep '/internal/' \
+   336→   336→                | grep -v "\"${CANONICAL}/internal/" || true)
+   337→   337→          if [ -n "$BAD" ]; then
+   338→   338→            echo "ERROR: stale internal imports remain:"; echo "$BAD"; exit 1
+   339→   339→          fi
+   340→   340→          echo "Consistency check passed — zero mismatched imports."
+   341→   341→
+   342→   342→      - name: Tidy Go modules
+   343→   343→        run: |
+   344→   344→          set -euo pipefail
+   345→   345→          go mod tidy
+   346→   346→          touch go.sum
+   347→   347→
+   348→   348→      - name: go vet (zero errors)
+   349→   349→        run: |
+   350→   350→          set -euo pipefail
+   351→   351→          go vet ./...
+   352→   352→
+   353→   353→      - name: Build iran_tester
+   354→   354→        run: |
+   355→   355→          set -euo pipefail
+   356→   356→          CGO_ENABLED=0 GOOS=linux go build -o iran_tester ./cmd/iran_tester/
+   357→   357→
+   358→   358→      - name: Build probe_scheduler
+   359→   359→        run: |
+   360→   360→          set -euo pipefail
+   361→   361→          CGO_ENABLED=0 GOOS=linux go build -o probe_scheduler ./cmd/probe_scheduler/
+   362→   362→
+   363→   363→      - uses: actions/upload-artifact@v6
+   364→   364→        with:
+   365→   365→          name: go-bins
+   366→   366→          path: |
+   367→   367→            iran_tester
+   368→   368→            probe_scheduler
+   369→   369→            go.mod
+   370→   370→            go.sum
+   371→   371→          retention-days: 1
+   372→   372→
+   373→   373→  # ────────────────────────────────────────────────────────────────────────────
+   374→   374→  scrape-and-test:
+   375→   375→  # ────────────────────────────────────────────────────────────────────────────
+   376→   376→    runs-on: ubuntu-latest
+   377→   377→    needs: [quality-gate, build-rust, build-go]
+   378→   378→    timeout-minutes: 50
+   379→   379→
+   380→   380→    steps:
+   381→   381→      - uses: actions/checkout@v5
+   382→   382→        with:
+   383→   383→          fetch-depth: 0
+   384→   384→
+   385→   385→      - uses: actions/setup-python@v6
+   386→   386→        with:
+   387→   387→          python-version: '3.11'
+   388→   388→          cache: 'pip'
+   389→   389→
+   390→   390→      - name: Install Python dependencies
+   391→   391→        run: |
+   392→   392→          set -euo pipefail
+   393→   393→          pip install -r requirements.txt
+   394→   394→
+   395→   395→      - name: Remove Vercel secrets (cleanup — additive step)
+   396→   396→        env:
+   397→   397→          GH_PAT_AUTOFIX: ${{ secrets.GH_PAT_AUTOFIX }}
+   398→   398→          GH_REPO_OWNER:  ${{ secrets.GH_REPO_OWNER }}
+   399→   399→          GH_REPO_NAME:   ${{ secrets.GH_REPO_NAME }}
+   400→   400→        run: |
+   401→   401→          # Remove only Vercel-related secrets. All other secrets are preserved.
+   402→   402→          cat > /tmp/_vercel_cleanup.py << 'ENDSCRIPT'
+   403→   403→          import os, urllib.request, urllib.error, json
+   404→   404→          token = os.environ.get("GH_PAT_AUTOFIX", "")
+   405→   405→          owner = os.environ.get("GH_REPO_OWNER", "")
+   406→   406→          repo  = os.environ.get("GH_REPO_NAME", "")
+   407→   407→          if not all([token, owner, repo]):
+   408→   408→              print("Cleanup: missing PAT -- skipping")
+   409→   409→              exit(0)
+   410→   410→          base = f"https://api.github.com/repos/{owner}/{repo}/actions/secrets"
+   411→   411→          headers = {
+   412→   412→              "Authorization": f"Bearer {token}",
+   413→   413→              "Accept": "application/vnd.github+json",
+   414→   414→              "X-GitHub-Api-Version": "2022-11-28",
+   415→   415→          }
+   416→   416→          try:
+   417→   417→              req = urllib.request.Request(base, headers=headers)
+   418→   418→              with urllib.request.urlopen(req, timeout=15) as r:
+   419→   419→                  data = json.loads(r.read())
+   420→   420→              secrets = [s["name"] for s in data.get("secrets", [])]
+   421→   421→          except Exception as e:
+   422→   422→              print(f"Cleanup: could not list secrets: {e}")
+   423→   423→              exit(0)
+   424→   424→          vercel_secrets = [s for s in secrets if "VERCEL" in s.upper()]
+   425→   425→          for name in vercel_secrets:
+   426→   426→              try:
+   427→   427→                  req = urllib.request.Request(
+   428→   428→                      f"{base}/{name}", method="DELETE", headers=headers
+   429→   429→                  )
+   430→   430→                  urllib.request.urlopen(req, timeout=15)
+   431→   431→                  print(f"Deleted Vercel secret: {name}")
+   432→   432→              except Exception as e:
+   433→   433→                  print(f"Could not delete {name}: {e}")
+   434→   434→          if not vercel_secrets:
+   435→   435→              print("No Vercel secrets found -- nothing to clean up.")
+   436→   436→          ENDSCRIPT
+   437→   437→          python3 /tmp/_vercel_cleanup.py
+   438→   438→
+   439→   439→      - name: Stage 00 — Autonomous self-heal pipeline diagnostics
+   440→   440→        continue-on-error: true
+   441→   441→        timeout-minutes: 5
+   442→   442→        env:
+   443→   443→          GITHUB_TOKEN:      ${{ secrets.GITHUB_TOKEN }}
+   444→   444→          PORTKEY_API_KEY:   ${{ secrets.PORTKEY_API_KEY }}
+   445→   445→          CEREBRAS_API_KEY:  ${{ secrets.CEREBRAS_API_KEY }}
+   446→   446→          GROQ_API_KEY:      ${{ secrets.GROQ_API_KEY }}
+   447→   447→        run: python self_heal.py --heal
+   448→   448→
+   449→   449→      - uses: actions/download-artifact@v5
+   450→   450→        with:
+   451→   451→          name: bridge-probe-bin
+   452→   452→          path: bridge-probe/target/release/
+   453→   453→
+   454→   454→      - uses: actions/download-artifact@v5
+   455→   455→        with:
+   456→   456→          name: go-bins
+   457→   457→          path: .
+   458→   458→
+   459→   459→      - name: Set executable permissions
+   460→   460→        run: |
+   461→   461→          set -euo pipefail
+   462→   462→          chmod +x bridge-probe/target/release/bridge-probe iran_tester probe_scheduler
+   463→   463→
+   464→   464→      - name: Stage 0 — Direct scraper (bridges.torproject.org seed)
+   465→   465→        continue-on-error: true
+   466→   466→        timeout-minutes: 5
+   467→   467→        run: python sources/direct_scraper.py
+   468→   468→
+   469→   469→      - name: Stage 0b — OnionHop bridge collection
+   470→   470→        continue-on-error: true
+   471→   471→        timeout-minutes: 5
+   472→   472→        run: python onionhop_collector.py
+   473→   473→
+   474→   474→      - name: Stage 0c — Legacy scraper (Telegram ZIP + README)
+   475→   475→        continue-on-error: true
+   476→   476→        timeout-minutes: 5
+   477→   477→        run: python sources/legacy_scraper.py
+   478→   478→
+   479→   479→      - name: Stage 1 — Scraper (all sources)
+   480→   480→        timeout-minutes: 10
+   481→   481→        run: |
+   482→   482→          set -euo pipefail
+   483→   483→          python scraper.py
+   484→   484→
+   485→   485→      - name: FAILSAFE — ensure bridge files always have content
+   486→   486→        timeout-minutes: 3
+   487→   487→        run: |
+   488→   488→          set -euo pipefail
+   489→   489→          cat > /tmp/_failsafe_bridges.py << 'ENDSCRIPT'
+   490→   490→          import json, sys
+   491→   491→          from pathlib import Path
+   492→   492→          bridge_dir = Path("bridge")
+   493→   493→          bridge_dir.mkdir(exist_ok=True)
+   494→   494→          Path("data").mkdir(exist_ok=True)
+   495→   495→          hist_file = bridge_dir / "bridge_history.json"
+   496→   496→          history = {}
+   497→   497→          if hist_file.exists() and hist_file.stat().st_size > 2:
+   498→   498→              try:
+   499→   499→                  history = json.loads(hist_file.read_text(encoding="utf-8"))
+   500→   500→              except Exception as e:
+   501→   501→                  print(f"WARNING: {e}")
+   502→   502→          transport_map = {"obfs4": [], "snowflake": [], "meek_lite": [], "webtunnel": [], "vanilla": []}
+   503→   503→          for k, v in history.items():
+   504→   504→              if isinstance(v, dict):
+   505→   505→                  t = v.get("transport", ""); raw = v.get("raw", "")
+   506→   506→                  if t in transport_map and raw:
+   507→   507→                      transport_map[t].append(raw.strip())
+   508→   508→          total = 0
+   509→   509→          for transport, bridges in transport_map.items():
+   510→   510→              fpath = bridge_dir / f"{transport}.txt"
+   511→   511→              if not fpath.exists() or fpath.stat().st_size == 0:
+   512→   512→                  if bridges:
+   513→   513→                      fpath.write_text("\n".join(bridges) + "\n", encoding="utf-8")
+   514→   514→                      print(f"FAILSAFE: wrote {len(bridges)} {transport} bridges")
+   515→   515→                      total += len(bridges)
+   516→   516→              else:
+   517→   517→                  cnt = len([l for l in fpath.read_text().splitlines() if l.strip()])
+   518→   518→                  print(f"OK {fpath}: {cnt} bridges")
+   519→   519→          test_json = bridge_dir / "bridge_list_for_testing.json"
+   520→   520→          if not test_json.exists() or test_json.stat().st_size < 5:
+   521→   521→              all_b = [v.get("raw","") for v in history.values() if isinstance(v,dict) and v.get("raw")]
+   522→   522→              if not all_b:
+   523→   523→                  sys.path.insert(0, ".")
+   524→   524→                  from sources.static_bridges import get_all
+   525→   525→                  all_b = [line for line, _, _ in get_all()]
+   526→   526→              if all_b:
+   527→   527→                  test_json.write_text(json.dumps(all_b, indent=2), encoding="utf-8")
+   528→   528→                  print(f"FAILSAFE: wrote {len(all_b)} bridges to bridge_list_for_testing.json")
+   529→   529→          print(f"FAILSAFE done. Extra bridges written: {total}")
+   530→   530→          ENDSCRIPT
+   531→   531→          python3 /tmp/_failsafe_bridges.py
+   532→   532→
+   533→   533→      - name: Stage 2 — iran_tester (TCP/ASN/OONI/CDN analysis)
+   534→   534→        timeout-minutes: 12
+   535→   535→        run: |
+   536→   536→          set -euo pipefail
+   537→   537→          ./iran_tester \
+   538→   538→            --input  bridge/bridge_list_for_testing.json \
+   539→   539→            --output bridge/iran_results.json \
+   540→   540→            --workers 100 \
+   541→   541→            --timeout 8s
+   542→   542→
+   543→   543→      # ── HANG FIX: Stage 3 ──────────────────────────────────────────────────
+   544→   544→      # Root cause of the 5-hour hang: probe_scheduler starts an HTTP server
+   545→   545→      # that never exits on its own.  Running it bare with & left a zombie
+   546→   546→      # process that blocked the runner until the 6-hour GitHub hard limit.
+   547→   547→      #
+   548→   548→      # Fix:
+   549→   549→      #   1. Wrap with `timeout 300` so the OS forcibly kills it after 5 min.
+   550→   550→      #   2. Capture the PID for an explicit kill in the cleanup step.
+   551→   551→      #   3. touch /tmp/sched_started as a liveness flag so Stage 4 can
+   552→   552→      #      branch correctly even if Stage 3 is skipped via continue-on-error.
+   553→   553→      - name: Stage 3 — probe_scheduler (RIPE Atlas + MOAT merge)
+   554→   554→        continue-on-error: true
+   555→   555→        timeout-minutes: 12
+   556→   556→        env:
+   557→   557→          RIPE_ATLAS_API_KEY: ${{ secrets.RIPE_ATLAS_API_KEY }}
+   558→   558→        run: |
+   559→   559→          timeout 300 ./probe_scheduler \
+   560→   560→            --bridges data/iran_bridges.json \
+   561→   561→            --port 8742 &
+   562→   562→          SCHED_PID=$!
+   563→   563→          echo "$SCHED_PID" > /tmp/probe_sched.pid
+   564→   564→          echo "probe_scheduler PID=$SCHED_PID"
+   565→   565→          touch /tmp/sched_started
+   566→   566→          # Give the scheduler time to initialise before the Rust probe reads
+   567→   567→          # its /results endpoint; 10 s is enough for MOAT fetch + JSON marshal.
+   568→   568→          sleep 10
+   569→   569→
+   570→   570→      - name: Stage 4 — bridge-probe (Rust PT handshakes)
+   571→   571→        timeout-minutes: 15
+   572→   572→        run: |
+   573→   573→          set -euo pipefail
+   574→   574→          cat bridge/bridge_list_for_testing.json \
+   575→   575→            | ./bridge-probe/target/release/bridge-probe \
+   576→   576→              --timeout 20 --workers 50 \
+   577→   577→            > data/pt_results.json
+   578→   578→
+   579→   579→      # ── HANG FIX: Stage 4 cleanup ──────────────────────────────────────────
+   580→   580→      # Runs unconditionally (if: always()) after Stage 4 to terminate the
+   581→   581→      # probe_scheduler that was backgrounded in Stage 3.
+   582→   582→      # Uses three escalating kill signals and fuser as a final fallback to
+   583→   583→      # ensure port 8742 is released even if the PID file is stale.
+   584→   584→      - name: Stage 4 cleanup — kill probe_scheduler
+   585→   585→        if: always()
+   586→   586→        run: |
+   587→   587→          if [ -f /tmp/probe_sched.pid ]; then
+   588→   588→            PID=$(cat /tmp/probe_sched.pid)
+   589→   589→            echo "Terminating probe_scheduler PID=$PID"
+   590→   590→            kill -TERM "$PID" 2>/dev/null || true
+   591→   591→            sleep 2
+   592→   592→            kill -KILL "$PID" 2>/dev/null || true
+   593→   593→            rm -f /tmp/probe_sched.pid
+   594→   594→          fi
+   595→   595→          # Belt-and-suspenders: release port 8742 regardless
+   596→   596→          fuser -k 8742/tcp 2>/dev/null || true
+   597→   597→          echo "probe_scheduler cleanup complete."
+   598→   598→
+   599→   599→      - name: Stage 5 — OONI correlator
+   600→   600→        continue-on-error: true
+   601→   601→        timeout-minutes: 8
+   602→   602→        run: python ooni_correlator.py
+   603→   603→
+   604→   604→      - name: Stage 6a — Score bridges
+   605→   605→        timeout-minutes: 8
+   606→   606→        run: |
+   607→   607→          set -euo pipefail
+   608→   608→          python main.py --mode score
+   609→   609→
+   610→   610→      - name: Stage 6b — Export bridge files
+   611→   611→        timeout-minutes: 5
+   612→   612→        run: |
+   613→   613→          set -euo pipefail
+   614→   614→          python main.py --mode export
+   615→   615→
+   616→   616→      - name: Stage 7 — ML blocking predictor
+   617→   617→        continue-on-error: true
+   618→   618→        timeout-minutes: 8
+   619→   619→        run: python ml_predictor.py --train --apply
+   620→   620→
+   621→   621→      - name: Stage 8 — Adaptive transport engine
+   622→   622→        continue-on-error: true
+   623→   623→        timeout-minutes: 5
+   624→   624→        run: python adaptive_transport.py
+   625→   625→
+   626→   626→      - name: Stage 8b — DPI intelligence report
+   627→   627→        continue-on-error: true
+   628→   628→        timeout-minutes: 5
+   629→   629→        run: python dpi_evasion_advanced.py
+   630→   630→
+   631→   631→      - name: Stage 8c — Next-gen protocol scan (Hysteria2/REALITY/VLESS)
+   632→   632→        continue-on-error: true
+   633→   633→        timeout-minutes: 8
+   634→   634→        run: python next_gen_transports.py
+   635→   635→
+   636→   636→      - name: Stage 8d — NIN internet-cut bridge pack
+   637→   637→        continue-on-error: true
+   638→   638→        timeout-minutes: 5
+   639→   639→        run: python -m core.nin_selector
+   640→   640→
+   641→   641→      - name: Stage 8d2 — NIN bypass analysis (ECH/CDN survivability scoring)
+   642→   642→        continue-on-error: true
+   643→   643→        timeout-minutes: 5
+   644→   644→        run: python iran_nin_bypass.py
+   645→   645→
+   646→   646→      - name: Stage 8e — ECH/post-quantum bridge scoring
+   647→   647→        continue-on-error: true
+   648→   648→        timeout-minutes: 5
+   649→   649→        run: python quantum_safe.py
+   650→   650→
+   651→   651→      - name: Stage 8f — WARP bootstrap check
+   652→   652→        continue-on-error: true
+   653→   653→        timeout-minutes: 5
+   654→   654→        run: python warp_bootstrap.py
+   655→   655→
+   656→   656→      - name: Stage 8g — ECH fingerprint evasion scoring
+   657→   657→        continue-on-error: true
+   658→   658→        timeout-minutes: 20
+   659→   659→        run: python ech_fingerprint_evasion.py
+   660→   660→
+   661→   661→      - name: Stage 8h — NIN advanced bypass analysis
+   662→   662→        continue-on-error: true
+   663→   663→        timeout-minutes: 20
+   664→   664→        run: python nin_advanced_bypass.py
+   665→   665→
+   666→   666→      - name: Stage 8i — Anti-AI DPI scoring
+   667→   667→        continue-on-error: true
+   668→   668→        timeout-minutes: 5
+   669→   669→        run: python anti_ai_dpi.py
+   670→   670→
+   671→   671→      - name: Stage 8i-smart — Smart Iran AI re-ranker (v9.0)
+   672→   672→        continue-on-error: true
+   673→   673→        timeout-minutes: 8
+   674→   674→        env:
+   675→   675→          CF_ACCOUNT_ID_1: ${{ secrets.CF_ACCOUNT_ID_1 }}
+   676→   676→          CF_API_TOKEN_1:  ${{ secrets.CF_API_TOKEN_1 }}
+   677→   677→          CF_AI_GATEWAY_URL_1: ${{ secrets.CF_AI_GATEWAY_URL_1 }}
+   678→   678→          CEREBRAS_API_KEY_1:  ${{ secrets.CEREBRAS_API_KEY_1 }}
+   679→   679→        run: |
+   680→   680→          python scripts/ai_bridge_reranker.py \
+   681→   681→            --input  bridge/iran_results.json \
+   682→   682→            --output data/smart_iran_results.json \
+   683→   683→            --batch-size 20
+   684→   684→          python -c "
+   685→   685→          import json, pathlib
+   686→   686→          p = pathlib.Path('data/smart_iran_results.json')
+   687→   687→          if p.exists():
+   688→   688→              d = json.loads(p.read_text())
+   689→   689→              bs = d.get('bridges', d) if isinstance(d, dict) else d
+   690→   690→              total = len(bs)
+   691→   691→              excellent = sum(1 for b in bs if b.get('smart_iran_scores',{}).get('tier') == 'excellent')
+   692→   692→              print(f'Smart-scored {total} bridges | excellent={excellent}')
+   693→   693→          "
+   694→   694→
+   695→   695→      # ── Stage 8j: Agentic AI DPI mutator ──────────────────────────────────
+   696→   696→      # Reads data/dpi_intelligence.json produced by Stage 8b.  If active
+   697→   697→      # blocking patterns are detected, ai_dpi_mutator.py rewrites obfuscation
+   698→   698→      # parameters in the Go/Rust source tree, triggers a rebuild, and commits
+   699→   699→      # the updated binaries — all without human intervention.
+   700→   700→      - name: Stage 8j — Agentic AI DPI mutator (self-heal loop)
+   701→   701→        continue-on-error: true
+   702→   702→        timeout-minutes: 10
+   703→   703→        env:
+   704→   704→          GITHUB_TOKEN:          ${{ secrets.GITHUB_TOKEN }}
+   705→   705→          GEMINI_API_KEY:        ${{ secrets.GEMINI_API_KEY }}
+   706→   706→          GROQ_API_KEY:          ${{ secrets.GROQ_API_KEY }}
+   707→   707→          HUGGINGFACE_API_KEY:   ${{ secrets.HUGGINGFACE_API_KEY }}
+   708→   708→          DEEPSEEK_API_KEY:      ${{ secrets.DEEPSEEK_API_KEY }}
+   709→   709→          MISTRAL_API_KEY:       ${{ secrets.MISTRAL_API_KEY }}
+   710→   710→          CF_ACCOUNT_ID_1:        ${{ secrets.CF_ACCOUNT_ID_1 }}
+   711→   711→          CF_API_TOKEN_1:         ${{ secrets.CF_API_TOKEN_1 }}
+   712→   712→          CF_AI_GATEWAY_URL_1:    ${{ secrets.CF_AI_GATEWAY_URL_1 }}
+   713→   713→          CF_ACCOUNT_ID_2:        ${{ secrets.CF_ACCOUNT_ID_2 }}
+   714→   714→          CF_API_TOKEN_2:         ${{ secrets.CF_API_TOKEN_2 }}
+   715→   715→          CF_AI_GATEWAY_URL_2:    ${{ secrets.CF_AI_GATEWAY_URL_2 }}
+   716→   716→          CF_ACCOUNT_ID_3:        ${{ secrets.CF_ACCOUNT_ID_3 }}
+   717→   717→          CF_API_TOKEN_3:         ${{ secrets.CF_API_TOKEN_3 }}
+   718→   718→          CF_AI_GATEWAY_URL_3:    ${{ secrets.CF_AI_GATEWAY_URL_3 }}
+   719→   719→          CF_ACCOUNT_ID_4:        ${{ secrets.CF_ACCOUNT_ID_4 }}
+   720→   720→          CF_API_TOKEN_4:         ${{ secrets.CF_API_TOKEN_4 }}
+   721→   721→          CF_AI_GATEWAY_URL_4:    ${{ secrets.CF_AI_GATEWAY_URL_4 }}
+   722→   722→          CF_ACCOUNT_ID_5:        ${{ secrets.CF_ACCOUNT_ID_5 }}
+   723→   723→          CF_API_TOKEN_5:         ${{ secrets.CF_API_TOKEN_5 }}
+   724→   724→          CF_AI_GATEWAY_URL_5:    ${{ secrets.CF_AI_GATEWAY_URL_5 }}
+   725→   725→          CF_ACCOUNT_ID_6:        ${{ secrets.CF_ACCOUNT_ID_6 }}
+   726→   726→          CF_API_TOKEN_6:         ${{ secrets.CF_API_TOKEN_6 }}
+   727→   727→          CF_AI_GATEWAY_URL_6:    ${{ secrets.CF_AI_GATEWAY_URL_6 }}
+   728→   728→          CF_ACCOUNT_ID_7:        ${{ secrets.CF_ACCOUNT_ID_7 }}
+   729→   729→          CF_API_TOKEN_7:         ${{ secrets.CF_API_TOKEN_7 }}
+   730→   730→          CF_AI_GATEWAY_URL_7:    ${{ secrets.CF_AI_GATEWAY_URL_7 }}
+   731→   731→          CF_ACCOUNT_ID_8:        ${{ secrets.CF_ACCOUNT_ID_8 }}
+   732→   732→          CF_API_TOKEN_8:         ${{ secrets.CF_API_TOKEN_8 }}
+   733→   733→          CF_AI_GATEWAY_URL_8:    ${{ secrets.CF_AI_GATEWAY_URL_8 }}
+   734→   734→          CF_ACCOUNT_ID_9:        ${{ secrets.CF_ACCOUNT_ID_9 }}
+   735→   735→          CF_API_TOKEN_9:         ${{ secrets.CF_API_TOKEN_9 }}
+   736→   736→          CF_AI_GATEWAY_URL_9:    ${{ secrets.CF_AI_GATEWAY_URL_9 }}
+   737→   737→          CF_ACCOUNT_ID_10:       ${{ secrets.CF_ACCOUNT_ID_10 }}
+   738→   738→          CF_API_TOKEN_10:        ${{ secrets.CF_API_TOKEN_10 }}
+   739→   739→          CF_AI_GATEWAY_URL_10:   ${{ secrets.CF_AI_GATEWAY_URL_10 }}
+   740→   740→          CF_ACCOUNT_ID_11:       ${{ secrets.CF_ACCOUNT_ID_11 }}
+   741→   741→          CF_API_TOKEN_11:        ${{ secrets.CF_API_TOKEN_11 }}
+   742→   742→          CF_AI_GATEWAY_URL_11:   ${{ secrets.CF_AI_GATEWAY_URL_11 }}
+   743→   743→          HYPERBOLIC_API_KEY:    ${{ secrets.HYPERBOLIC_API_KEY }}
+   744→   744→          PORTKEY_API_KEY:       ${{ secrets.PORTKEY_API_KEY }}
+   745→   745→          CEREBRAS_API_KEY:      ${{ secrets.CEREBRAS_API_KEY }}
+   746→   746→        run: python ai_dpi_mutator.py
+   747→   747→
+   748→   748→      - name: Stage 8k — NIN internet-cut survivability tester
+   749→   749→        continue-on-error: true
+   750→   750→        timeout-minutes: 8
+   751→   751→        run: python nin_cut_tester.py
+   752→   752→
+   753→   753→      - name: Stage 8l — XTLS-Reality VLESS config generator
+   754→   754→        continue-on-error: true
+   755→   755→        timeout-minutes: 8
+   756→   756→        run: python xtls_reality_wrapper.py
+   757→   757→
+   758→   758→      - name: Stage 8m — eBPF/XDP deployment blueprint generator
+   759→   759→        continue-on-error: true
+   760→   760→        timeout-minutes: 3
+   761→   761→        run: python ebpf_blueprint.py
+   762→   762→
+   763→   763→      - name: Stage 8n — JA3/TLS fingerprint rotation engine
+   764→   764→        continue-on-error: true
+   765→   765→        timeout-minutes: 5
+   766→   766→        run: python ja3_intelligence.py --rotate
+   767→   767→
+   768→   768→      - name: Stage 8o — Certificate Transparency MITM monitor
+   769→   769→        continue-on-error: true
+   770→   770→        timeout-minutes: 15
+   771→   771→        run: python ztunnel_ct_monitor.py
+   772→   772→
+   773→   773→      - name: Stage 8p — NIN internet-cut bridge classifier
+   774→   774→        continue-on-error: true
+   775→   775→        timeout-minutes: 6
+   776→   776→        run: python nin_internet_cut_classifier.py
+   777→   777→
+   778→   778→      - name: Stage 8q — Zig ultra-fast TCP bridge pre-screener
+   779→   779→        continue-on-error: true
+   780→   780→        timeout-minutes: 6
+   781→   781→        run: |
+   782→   782→          set +e
+   783→   783→          if command -v zig &>/dev/null && [[ -d zig-scanner ]]; then
+   784→   784→            cd zig-scanner && zig build -Doptimize=ReleaseFast 2>&1 || true
+   785→   785→            if [[ -f zig-out/bin/zig-scanner ]]; then
+   786→   786→              ./zig-out/bin/zig-scanner ../data/latest-results.json 2>&1 || true
+   787→   787→            fi
+   788→   788→            cd ..
+   789→   789→          else
+   790→   790→            echo "Zig not available — skipping Stage 8q"
+   791→   791→          fi
+   792→   792→
+   793→   793→      # ── Stage 8r: Iran SIAM/NGFW Anti-AI DPI Evasion Analysis ────────────
+   794→   794→      # Scores every bridge against Iran's 8-layer SIAM DPI pipeline:
+   795→   795→      #   L1 Packet-length CNN | L2 IAT timing LSTM | L3 NetFlow features
+   796→   796→      #   L4 JA3/JA3S fingerprint | L5 Certificate+SNI | L6 ALPN anomaly
+   797→   797→      #   L7 Temporal keepalive | L8 AS relationship graph
+   798→   798→      # Outputs PHANTOM + STEALTH tier bridges for maximum evasion.
+   799→   799→      - name: Stage 8r — Iran SIAM/NGFW Anti-AI DPI evasion analysis
+   800→   800→        continue-on-error: true
+   801→   801→        timeout-minutes: 6
+   802→   802→        run: python iran_anti_siam.py
+   803→   803→
+   804→   804→      - name: Stage 9 — Write results + Telegram notification
+   805→   805→        timeout-minutes: 8
+   806→   806→        env:
+   807→   807→          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+   808→   808→          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+   809→   809→          TELEGRAM_UPLOAD:    ${{ github.event.inputs.upload_to_telegram || 'false' }}
+   810→   810→          REPO_URL:           https://raw.githubusercontent.com/${{ github.repository }}/refs/heads/main
+   811→   811→        run: |
+   812→   812→          set -euo pipefail
+   813→   813→          python results_writer.py
+   814→   814→
+   815→   815→      # ── BUG FIX: Stage 10 ─────────────────────────────────────────────────
+   816→   816→      # Previous error: "printf: 0 0: invalid number"
+   817→   817→      # Cause: count=$(grep -c . "$f" 2>/dev/null || echo 0)
+   818→   818→      #   grep exits 1 (no matches) and prints "0\n"; then || echo 0 appends
+   819→   819→      #   another "0\n"; $() captures "0\n0" — not a valid printf %d argument.
+   820→   820→      # Fix: separate the capture from the fallback:
+   821→   821→      #   count=$(grep -c . "$f" 2>/dev/null) || count=0
+   822→   822→      - name: Stage 10 — Bridge count summary
+   823→   823→        timeout-minutes: 3
+   824→   824→        run: |
+   825→   825→          echo "═══ Bridge File Summary ═══"
+   826→   826→          shopt -s nullglob
+   827→   827→          for f in bridge/*.txt; do
+   828→   828→            count=$(grep -c . "$f" 2>/dev/null) || count=0
+   829→   829→            count=${count//[$'\t\r\n ']/}
+   830→   830→            count=${count:-0}
+   831→   831→            printf "%-45s %d\n" "$f" "$count"
+   832→   832→          done
+   833→   833→          echo "═══════════════════════════"
+   834→   834→          ALL_OK=true
+   835→   835→          for req in iran_likely_working_all.txt iran_likely_working_obfs4.txt iran_likely_working_webtunnel.txt; do
+   836→   836→            fpath="bridge/$req"
+   837→   837→            count=0
+   838→   838→            if [ -f "$fpath" ]; then
+   839→   839→              count=$(grep -c . "$fpath" 2>/dev/null) || count=0
+   840→   840→              count=${count//[$'\t\r\n ']/}
+   841→   841→              count=${count:-0}
+   842→   842→            fi
+   843→   843→            if [ "$count" -gt 0 ]; then
+   844→   844→              echo "✅ $req: $count bridges"
+   845→   845→            else
+   846→   846→              echo "⚠️  $req: 0 bridges"
+   847→   847→              ALL_OK=false
+   848→   848→            fi
+   849→   849→          done
+   850→   850→          if [ "$ALL_OK" = "true" ]; then
+   851→   851→            echo "✅ All required bridge files populated."
+   852→   852→          else
+   853→   853→            echo "⚠️  Some bridge files empty — check scraper/tester logs above."
+   854→   854→          fi
+   855→   855→
+   856→   856→      - name: Stage 11 — Commit and push
+   857→   857→        timeout-minutes: 5
+   858→   858→        run: |
+   859→   859→          set -euo pipefail
+   860→   860→          git config --global user.name  "github-actions[bot]"
+   861→   861→          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+   862→   862→          git pull origin main --rebase --autostash
+   863→   863→          git add bridge/ data/ docs/ export/ README.md go.mod go.sum \
+   864→   864→                  cmd/ internal/ onionhop_collector.py zig-scanner/ \
+   865→   865→                  ebpf_blueprint.py nin_cut_tester.py xtls_reality_wrapper.py \
+   866→   866→                  ai_dpi_mutator.py next_gen_transports.py quantum_safe.py \
+   867→   867→                  adaptive_transport.py ja3_intelligence.py \
+   868→   868→                  ztunnel_ct_monitor.py nin_internet_cut_classifier.py \
+   869→   869→                  self_heal.py generate_quantum_project.sh \
+   870→   870→                  iran_anti_siam.py core/iran_dpi_shaper.py \
+   871→   871→                  torshield_ai_gateway/ scripts/ || true
+   872→   872→          [ -f go.sum ] && git add go.sum || true
+   873→   873→          [ -f bridge-probe/Cargo.lock ] && git add bridge-probe/Cargo.lock || true
+   874→   874→          if git diff --staged --quiet; then
+   875→   875→            echo "No changes to commit."
+   876→   876→          else
+   877→   877→            git commit -m "chore: update bridges and Iran reachability data [skip ci]"
+   878→   878→            git push
+   879→   879→          fi
+   880→   880→
+   881→   881→      - uses: actions/upload-artifact@v6
+   882→   882→        if: always()
+   883→   883→        with:
+   884→   884→          name: bridge-intelligence-report
+   885→   885→          path: |
+   886→   886→            data/latest-results.json
+   887→   887→            data/pt_results.json
+   888→   888→            data/best_transports.json
+   889→   889→            data/transport_weight_history.json
+   890→   890→            data/quantum_safe_report.json
+   891→   891→            data/warp_status.json
+   892→   892→            data/dpi_intelligence.json
+   893→   893→            data/next_gen_bridges.json
+   894→   894→            data/ech_report.json
+   895→   895→            data/nin_advanced_report.json
+   896→   896→            data/anti_ai_dpi_report.json
+   897→   897→            data/iran_siam_report.json
+   898→   898→            data/smart_iran_results.json
+   899→   899→            docs/iran-bridge-status.md
+   900→   900→            docs/iran-siam-analysis.md
+   901→   901→            bridge/iran_results.json
+   902→   902→            export/iran_cut_pack.txt
+   903→   903→            export/iran_phantom_bridges.txt
+   904→   904→            export/iran_stealth_bridges.txt
+   905→   905→            export/iran_siam_best_bridges.txt
+   906→   906→            export/warp_bridges.txt
+   907→   907→            export/ech_top_bridges.txt
+   908→   908→            export/nin_cut_bridges.txt
+   909→   909→            export/anti_ai_dpi_bridges.txt
+   910→   910→            data/nin_cut_report.json
+   911→   911→            data/reality_report.json
+   912→   912→            data/ai_consensus_report.json
+   913→   913→            data/pq_bridge_scores.json
+   914→   914→            data/ja3_rotation_plan.json
+   915→   915→            data/ja3_rotation_report.md
+   916→   916→            data/ct_monitor_report.json
+   917→   917→            data/zig_scan.json
+   918→   918→            export/nin_cut_survivable.txt
+   919→   919→            export/reality_configs.json
+   920→   920→            export/nin_recommended_transport.json
+   921→   921→            export/ct_flagged_domains.txt
+   922→   922→            export/ct_clean_bridges.txt
+   923→   923→            docs/ebpf_xdp_blueprint.md
+   924→   924→          retention-days: 7
+   925→   925→          if-no-files-found: ignore
+   926→   926→
+   927→   927→  # ────────────────────────────────────────────────────────────────────────────
+   928→   928→  package-final-artifact:
+   929→   929→  # ────────────────────────────────────────────────────────────────────────────
+   930→   930→    name: "Package Final Artifact"
+   931→   931→    needs: [scrape-and-test]
+   932→   932→    runs-on: ubuntu-latest
+   933→   933→    if: always()
+   934→   934→
+   935→   935→    steps:
+   936→   936→      - name: Checkout full repo
+   937→   937→        uses: actions/checkout@v5
+   938→   938→        with:
+   939→   939→          fetch-depth: 0
+   940→   940→
+   941→   941→      - name: Download all stage artifacts
+   942→   942→        uses: actions/download-artifact@v5
+   943→   943→        with:
+   944→   944→          path: all_artifacts/
+   945→   945→
+   946→   946→      - name: Bundle everything into tar.gz
+   947→   947→        run: |
+   948→   948→          mkdir -p dist/
+   949→   949→          tar --exclude='.git' \
+   950→   950→              --exclude='node_modules' \
+   951→   951→              --exclude='__pycache__' \
+   952→   952→              --exclude='*.pyc' \
+   953→   953→              --exclude='bridge-probe/target' \
+   954→   954→              -czf dist/Tor-Bridges-Collector-main-ultra-quantum-vip-vip-super-ultra-vip-ultra-quantum-ultra-vip-ultra-quantum.tar.gz \
+   955→   955→              . all_artifacts/
+   956→   956→          echo "Archive size: $(du -sh dist/*.tar.gz | cut -f1)"
+   957→   957→
+   958→   958→      - name: Upload Final Package
+   959→   959→        uses: actions/upload-artifact@v6
+   960→   960→        with:
+   961→   961→          name: TorShield-IR-Final-Package-${{ github.run_id }}
+   962→   962→          path: dist/Tor-Bridges-Collector-main-ultra-quantum-vip-vip-super-ultra-vip-ultra-quantum-ultra-vip-ultra-quantum.tar.gz
+   963→   963→          retention-days: 90
+   964→   964→
+   965→   965→      - name: Publish to GitHub Release
+   966→   966→        uses: softprops/action-gh-release@v2
+   967→   967→        if: startsWith(github.ref, 'refs/tags/')
+   968→   968→        with:
+   969→   969→          files: dist/Tor-Bridges-Collector-main-ultra-quantum-vip-vip-super-ultra-vip-ultra-quantum-ultra-vip-ultra-quantum.tar.gz
+   970→   970→          token: ${{ secrets.GH_PAT_AUTOFIX }}
+   971→   971→

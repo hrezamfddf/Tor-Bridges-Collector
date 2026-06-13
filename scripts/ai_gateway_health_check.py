@@ -820,14 +820,67 @@ def main():
     args = parser.parse_args()
 
     report = {
-        "version": "12.0-ultra-quantum",
+        "version": "13.0-ultra-quantum-dynamic-brain",
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "run_id": os.environ.get("GITHUB_RUN_ID", "local"),
+        "dynamic_brain": {},
         "model_selector": {},
         "env_validation": {},
         "results": [],
         "summary": {},
     }
+
+    # ── Step 0: Dynamic Brain — Fetch Live Models ─────────────────────────
+    logger.info("═══ Step 0: Dynamic Brain — Fetching Live Models ═══")
+    brain_ok = False
+    try:
+        from torshield_ai_gateway.dynamic_model_brain import get_brain, refresh_brain_sync
+        brain = get_brain()
+        brain_summary = refresh_brain_sync()
+        report["dynamic_brain"] = brain_summary
+        brain_ok = True
+        logger.info(
+            f"  ✓ Brain refreshed: {brain_summary.get('total_models', 0)} models "
+            f"({brain_summary.get('cf_model_count', 0)} CF, "
+            f"{brain_summary.get('portkey_model_count', 0)} Portkey)"
+        )
+        if brain_summary.get("fetch_errors"):
+            for err in brain_summary["fetch_errors"]:
+                logger.warning(f"  ⚠ Brain fetch error: {err[:200]}")
+    except ImportError:
+        logger.warning("  ⚠ dynamic_model_brain module not available — using offline fallback")
+        report["dynamic_brain"] = {"status": "unavailable", "reason": "module not found"}
+    except Exception as e:
+        logger.warning(f"  ⚠ Dynamic Brain refresh failed: {e}")
+        report["dynamic_brain"] = {"status": "error", "error": str(e)[:300]}
+
+    # ── Step 0b: Iran Anti-DPI Assessment ─────────────────────────────────
+    if brain_ok:
+        logger.info("═══ Step 0b: Iran DPI Assessment ═══")
+        try:
+            from torshield_ai_gateway.dynamic_brain_anti_dpi import run_dpi_assessment
+            assessment = run_dpi_assessment()
+            logger.info(
+                f"  DPI Threat Level: {assessment.threat_level.value} "
+                f"(confidence: {assessment.confidence:.0%})"
+            )
+            if assessment.detected_patterns:
+                logger.info(
+                    f"  Detected patterns: "
+                    f"{[p.value for p in assessment.detected_patterns]}"
+                )
+            logger.info(f"  Recommended model source: {assessment.model_preference}")
+            logger.info(f"  Max response tokens: {assessment.max_response_tokens}")
+            report["dynamic_brain"]["dpi_assessment"] = {
+                "threat_level": assessment.threat_level.value,
+                "confidence": assessment.confidence,
+                "model_preference": assessment.model_preference,
+                "max_response_tokens": assessment.max_response_tokens,
+            }
+        except ImportError:
+            logger.info("  ⊘ dynamic_brain_anti_dpi module not available — skipping DPI check")
+        except Exception as e:
+            logger.warning(f"  ⚠ DPI assessment failed: {e}")
 
     # ── Step 1: Environment Variable Validation ────────────────────────────
     if not args.skip_env_check:

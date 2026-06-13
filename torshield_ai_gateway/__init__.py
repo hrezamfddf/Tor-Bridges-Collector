@@ -1,7 +1,24 @@
 """
-torshield_ai_gateway — v19.0 Ultra-Quantum Edition
+torshield_ai_gateway — v20.0 Ultra-Quantum Edition + Dynamic Brain
 Dynamic multi-provider AI gateway with automatic model selection,
 exponential backoff retry, anti-DPI, smart Iran bypass, and auto-defense.
+
+v20.0 CHANGES (Fix-16.0: Dynamic Model Brain):
+  - NEW: dynamic_model_brain.py — Live model fetcher + intelligent scorer
+    Fetches models from all 11 CF accounts + Portkey APIs concurrently.
+    Scores models automatically (params, capabilities, context, recency).
+    Replaces hardcoded model IDs with live, scored, dynamic ranking.
+    Falls back to existing model_selector.py on any failure.
+  - NEW: dynamic_brain_anti_dpi.py — AI-powered anti-DPI integration
+    Detects Iran DPI threat level using multiple signal sources.
+    Automatically adjusts model selection for anti-DPI stealth.
+    Prefers CF-hosted models when DPI is active.
+    Limits response sizes to reduce traffic analysis surface.
+  - INTEGRATED: All providers now try Dynamic Brain first,
+    falling back to existing model_selector on any error.
+  - INTEGRATED: Health check Step 0 refreshes brain before checks.
+  - INTEGRATED: CI workflow uses live model ranking step.
+  - ZERO DELETIONS: All existing modules, functions, classes preserved.
 
 v18.0 CHANGES (Correction 7: URL Path + Response Parser + Config Errors):
   - CF AI Gateway URL uses OpenAI-compatible endpoint:
@@ -110,6 +127,56 @@ except ImportError:
     DiagnosticResult = None  # type: ignore[misc,assignment]
     get_auto_debugger = None  # type: ignore[misc,assignment]
 
+# Dynamic Model Brain (Fix-16.0 — graceful, import errors are non-fatal)
+try:
+    from .dynamic_model_brain import (
+        DynamicModelBrain,
+        LiveModel,
+        ModelSource,
+        get_brain,
+        ranked_cf_models_live,
+        best_portkey_model_live,
+        best_cf_model_live,
+        globally_strongest_model_live,
+        refresh_brain_sync,
+        activate_anti_dpi_if_needed,
+        score_model,
+        score_model_anti_dpi,
+    )
+except ImportError:
+    DynamicModelBrain = None  # type: ignore[misc,assignment]
+    LiveModel = None  # type: ignore[misc,assignment]
+    ModelSource = None  # type: ignore[misc,assignment]
+    get_brain = None  # type: ignore[misc,assignment]
+    ranked_cf_models_live = None  # type: ignore[misc,assignment]
+    best_portkey_model_live = None  # type: ignore[misc,assignment]
+    best_cf_model_live = None  # type: ignore[misc,assignment]
+    globally_strongest_model_live = None  # type: ignore[misc,assignment]
+    refresh_brain_sync = None  # type: ignore[misc,assignment]
+    activate_anti_dpi_if_needed = None  # type: ignore[misc,assignment]
+    score_model = None  # type: ignore[misc,assignment]
+    score_model_anti_dpi = None  # type: ignore[misc,assignment]
+
+# Dynamic Brain Anti-DPI (Fix-16.0 — graceful, import errors are non-fatal)
+try:
+    from .dynamic_brain_anti_dpi import (
+        DynamicBrainDPIAdapter,
+        IranDPIAssessor,
+        DPIAssessment,
+        DPIThreatLevel,
+        DPIPatternType,
+        get_dpi_adapter,
+        run_dpi_assessment,
+    )
+except ImportError:
+    DynamicBrainDPIAdapter = None  # type: ignore[misc,assignment]
+    IranDPIAssessor = None  # type: ignore[misc,assignment]
+    DPIAssessment = None  # type: ignore[misc,assignment]
+    DPIThreatLevel = None  # type: ignore[misc,assignment]
+    DPIPatternType = None  # type: ignore[misc,assignment]
+    get_dpi_adapter = None  # type: ignore[misc,assignment]
+    run_dpi_assessment = None  # type: ignore[misc,assignment]
+
 __all__ = [
     "TorShieldAIGateway",
     "get_gateway",
@@ -148,4 +215,25 @@ __all__ = [
     "get_auto_debugger",
     "ProviderConfigurationError",
     "BadRequestError",
+    # Dynamic Brain (Fix-16.0)
+    "DynamicModelBrain",
+    "LiveModel",
+    "ModelSource",
+    "get_brain",
+    "ranked_cf_models_live",
+    "best_portkey_model_live",
+    "best_cf_model_live",
+    "globally_strongest_model_live",
+    "refresh_brain_sync",
+    "activate_anti_dpi_if_needed",
+    "score_model",
+    "score_model_anti_dpi",
+    # Dynamic Brain Anti-DPI (Fix-16.0)
+    "DynamicBrainDPIAdapter",
+    "IranDPIAssessor",
+    "DPIAssessment",
+    "DPIThreatLevel",
+    "DPIPatternType",
+    "get_dpi_adapter",
+    "run_dpi_assessment",
 ]

@@ -1,0 +1,1025 @@
+     1→#!/usr/bin/env python3
+     2→"""
+     3→AI Gateway Health Check v13.0 — Ultra-Quantum Edition
+     4→═══════════════════════════════════════════════════════════════════════════
+     5→
+     6→CRITICAL FIXES from v12.0:
+     7→  1. FIX: Portkey key validation — removed pk- prefix check, uses length check (>=16)
+     8→  2. FIX: max_tokens raised to 256 for verbose/reasoning models
+     9→  3. FIX: Health check prompt simplified for maximum compliance
+    10→  4. FIX: BadRequestError handling — 400 is NOT an auth failure
+    11→
+    12→CRITICAL FIXES from v11.0:
+    13→  1. FIX: Auth errors (403/400/401) are NOT retried — they won't fix themselves
+    14→  2. FIX: Reduced default max_retries from 3 to 2 to prevent 20-min timeout
+    15→  3. FIX: WRONG_RESPONSE is now treated as FAILURE (not just degraded)
+    16→  4. FIX: Per-provider timeout protection — auth failures skip remaining retries
+    17→
+    18→PRESERVED from v10.0/v11.0:
+    19→  1. Exponential backoff retry mechanism for network failures
+    20→  2. Verbose debugging on authentication failure (NO key exposure)
+    21→  3. Strict non-zero exit when NO primary provider is reachable
+    22→  4. LocalAIEngine fallback is monitored but NOT counted as "ok"
+    23→  5. WRONG_RESPONSE is treated as a failure condition
+    24→  6. Env var validation before attempting any API calls
+    25→  7. Detailed diagnostic output for header/URL/credential issues
+    26→
+    27→HEALTH CHECK POLICY:
+    28→  - A provider is "ok" ONLY if it returns the expected TORSHIELD_OK signal
+    29→  - LocalAIEngine fallback is "degraded" status, NOT "ok"
+    30→  - Script exits 0 ONLY if at least one PRIMARY provider responds correctly
+    31→  - Script exits 1 if ALL primary providers fail (even if LocalAIEngine works)
+    32→  - Script exits 2 if required environment variables are missing entirely
+    33→
+    34→RETRY MECHANISM:
+    35→  - Configurable max retries (default 2) with exponential backoff
+    36→  - Base delay 1s, multiplier 2x, jitter ±0.5s
+    37→  - Auth errors (400/401/403) are NOT retried
+    38→  - Only network errors (timeout, 5xx, connection) are retried
+    39→"""
+    40→
+    41→import os
+    42→import sys
+    43→import json
+    44→import argparse
+    45→import time
+    46→import logging
+    47→import random
+    48→import urllib.error
+    49→import urllib.request
+    50→from typing import Dict, List, Optional, Any, Tuple
+    51→
+    52→# Import ProviderConfigurationError for config-level error handling
+    53→try:
+    54→    from torshield_ai_gateway.exceptions import ProviderConfigurationError, BadRequestError
+    55→except ImportError:
+    56→    # Fallback if exceptions module not available
+    57→    class ProviderConfigurationError(Exception):  # type: ignore[no-redef]
+    58→        """Fallback ProviderConfigurationError when torshield_ai_gateway is not available."""
+    59→        pass
+    60→    class BadRequestError(Exception):  # type: ignore[no-redef]
+    61→        """Fallback BadRequestError when torshield_ai_gateway is not available."""
+    62→        pass
+    63→
+    64→logging.basicConfig(
+    65→    level=logging.INFO,
+    66→    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    67→    datefmt="%Y-%m-%dT%H:%M:%S",
+    68→)
+    69→logger = logging.getLogger("health_check")
+    70→
+    71→sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    72→
+    73→
+    74→# ════════════════════════════════════════════════════════════════════════════
+    75→# RETRY WITH EXPONENTIAL BACKOFF
+    76→# ════════════════════════════════════════════════════════════════════════════
+    77→
+    78→class ExponentialBackoffRetry:
+    79→    """
+    80→    Robust exponential backoff retry mechanism with jitter.
+    81→
+    82→    Parameters:
+    83→        max_retries:    Maximum number of retry attempts (0 = no retry)
+    84→        base_delay_sec: Initial delay between retries in seconds
+    85→        max_delay_sec:  Maximum delay cap in seconds
+    86→        jitter:         Random jitter range ±seconds to avoid thundering herd
+    87→
+    88→    Backoff formula:
+    89→        delay = min(base_delay * 2^attempt + random(-jitter, +jitter), max_delay)
+    90→    """
+    91→
+    92→    def __init__(
+    93→        self,
+    94→        max_retries: int = 3,
+    95→        base_delay_sec: float = 1.0,
+    96→        max_delay_sec: float = 30.0,
+    97→        jitter: float = 0.5,
+    98→    ):
+    99→        self.max_retries = max_retries
+   100→        self.base_delay = base_delay_sec
+   101→        self.max_delay = max_delay_sec
+   102→        self.jitter = jitter
+   103→
+   104→    def compute_delay(self, attempt: int) -> float:
+   105→        """Compute the delay for the given attempt number (0-indexed)."""
+   106→        raw_delay = self.base_delay * (2 ** attempt)
+   107→        jittered = raw_delay + random.uniform(-self.jitter, self.jitter)
+   108→        return min(max(jittered, 0.1), self.max_delay)
+   109→
+   110→    def execute(self, func, *args, **kwargs) -> tuple:
+   111→        """
+   112→        Execute a function with exponential backoff retry.
+   113→
+   114→        Returns:
+   115→            (result, attempts_made, last_error)
+   116→            result is None if all attempts failed.
+   117→        """
+   118→        last_error = None
+   119→        for attempt in range(self.max_retries + 1):
+   120→            try:
+   121→                result = func(*args, **kwargs)
+   122→                return result, attempt + 1, None
+   123→            except Exception as e:
+   124→                last_error = e
+   125→                if attempt < self.max_retries:
+   126→                    delay = self.compute_delay(attempt)
+   127→                    logger.info(
+   128→                        f"  [Retry {attempt + 1}/{self.max_retries}] "
+   129→                        f"Backing off {delay:.1f}s after: {str(e)[:120]}"
+   130→                    )
+   131→                    time.sleep(delay)
+   132→                else:
+   133→                    logger.warning(
+   134→                        f"  [Retry EXHAUSTED] All {self.max_retries + 1} attempts failed: "
+   135→                        f"{str(e)[:150]}"
+   136→                    )
+   137→        return None, self.max_retries + 1, last_error
+   138→
+   139→
+   140→# ════════════════════════════════════════════════════════════════════════════
+   141→# VERBOSE AUTH FAILURE DIAGNOSTICS
+   142→# ════════════════════════════════════════════════════════════════════════════
+   143→
+   144→class AuthFailureDiagnostics:
+   145→    """
+   146→    Generates verbose debugging information when authentication fails.
+   147→    CRITICAL: NEVER exposes sensitive keys or tokens.
+   148→    """
+   149→
+   150→    @staticmethod
+   151→    def mask_key(key: str, visible_chars: int = 4) -> str:
+   152→        """Mask a key, showing only the first and last few characters."""
+   153→        if not key:
+   154→            return "<EMPTY>"
+   155→        if len(key) <= visible_chars * 2:
+   156→            return f"{key[:2]}***{key[-2:]}" if len(key) >= 4 else "***"
+   157→        return f"{key[:visible_chars]}...{key[-visible_chars:]}"
+   158→
+   159→    @staticmethod
+   160→    def diagnose_http_error(
+   161→        error: urllib.error.HTTPError,
+   162→        provider: str,
+   163→        url: str,
+   164→        headers_sent: dict,
+   165→        response_body: str = "",
+   166→    ) -> Dict[str, Any]:
+   167→        """
+   168→        Produce a detailed diagnostic report for an HTTP error.
+   169→        Masks all sensitive values in headers.
+   170→        """
+   171→        sensitive_keys = {
+   172→            "authorization", "x-portkey-api-key", "api-key",
+   173→            "x-api-key", "bearer", "token",
+   174→        }
+   175→
+   176→        # Mask headers
+   177→        masked_headers = {}
+   178→        for k, v in headers_sent.items():
+   179→            if k.lower() in sensitive_keys:
+   180→                masked_headers[k] = AuthFailureDiagnostics.mask_key(str(v))
+   181→            else:
+   182→                masked_headers[k] = str(v)
+   183→
+   184→        # Classify the error
+   185→        diagnosis = {
+   186→            "provider": provider,
+   187→            "http_status": error.code,
+   188→            "http_reason": str(error.reason) if hasattr(error, 'reason') else "Unknown",
+   189→            "url_pattern": AuthFailureDiagnostics._classify_url(url),
+   190→            "headers_sent": masked_headers,
+   191→            "response_body_preview": response_body[:300] if response_body else "<empty>",
+   192→            "diagnosis": AuthFailureDiagnostics._infer_root_cause(
+   193→                error.code, url, masked_headers, response_body
+   194→            ),
+   195→            "recommendations": [],
+   196→        }
+   197→
+   198→        # Add recommendations based on error code
+   199→        if error.code == 403:
+   200→            diagnosis["recommendations"] = [
+   201→                "Verify API key is valid and not expired",
+   202→                "Check if the API key has the required permissions/scopes",
+   203→                "Ensure the key format is correct (no trailing whitespace or newlines)",
+   204→                "Check if the provider has IP allowlisting that may block GitHub Actions",
+   205→                "Verify the account has remaining quota/credits",
+   206→                "Check if the service has region restrictions (Iran sanctions?)",
+   207→            ]
+   208→            if "cloudflare" in provider.lower():
+   209→                diagnosis["recommendations"].extend([
+   210→                    "Verify CF_API_TOKEN has 'Workers AI' permission",
+   211→                    "Check if CF_ACCOUNT_ID matches the token's account",
+   212→                    "Ensure gateway URL format: https://gateway.ai.cloudflare.com/v1/{account_id}/{slug}",
+   213→                ])
+   214→            elif "cerebras" in provider.lower():
+   215→                diagnosis["recommendations"].extend([
+   216→                    "Verify Cerebras API key is active at cloud.cerebras.ai",
+   217→                    "Check if the key has 'inference' scope enabled",
+   218→                    "Ensure the account has available credits",
+   219→                ])
+   220→            elif "portkey" in provider.lower():
+   221→                diagnosis["recommendations"].extend([
+   222→                    "Verify Portkey API key at app.portkey.ai",
+   223→                    "Check x-portkey-provider header is set correctly",
+   224→                    "Ensure virtual key configuration is active",
+   225→                ])
+   226→
+   227→        elif error.code == 400:
+   228→            diagnosis["recommendations"] = [
+   229→                "Check the request payload format matches the API specification",
+   230→                "Verify model ID is correct and available on this provider",
+   231→                "Check if required fields are missing from the request",
+   232→                "Ensure Content-Type header is 'application/json'",
+   233→            ]
+   234→            if "cloudflare_workers_ai" in provider.lower():
+   235→                diagnosis["recommendations"].extend([
+   236→                    "CF Workers AI model ID must be full path: @cf/provider/model-name",
+   237→                    "Verify the model is available on your account's region",
+   238→                    "Check if the model name has been updated/renamed",
+   239→                ])
+   240→
+   241→        return diagnosis
+   242→
+   243→    @staticmethod
+   244→    def _classify_url(url: str) -> str:
+   245→        """Classify URL structure without exposing account IDs."""
+   246→        if "cloudflare.com/client/v4/accounts" in url:
+   247→            # Mask account ID in URL
+   248→            parts = url.split("/accounts/")
+   249→            if len(parts) == 2:
+   250→                acct_part = parts[1].split("/")[0]
+   251→                masked = AuthFailureDiagnostics.mask_key(acct_part, 3)
+   252→                return f"https://api.cloudflare.com/client/v4/accounts/{masked}/***"
+   253→            return "cloudflare-api (account-masked)"
+   254→        elif "cerebras.ai" in url:
+   255→            return "cerebras-api"
+   256→        elif "portkey.ai" in url:
+   257→            return "portkey-api"
+   258→        elif "gateway.ai.cloudflare.com" in url:
+   259→            return "cf-ai-gateway (account-masked)"
+   260→        return url[:60] + "..." if len(url) > 60 else url
+   261→
+   262→    @staticmethod
+   263→    def _infer_root_cause(
+   264→        status_code: int, url: str, headers: dict, body: str
+   265→    ) -> str:
+   266→        """Infer the most likely root cause of the failure."""
+   267→        body_lower = body.lower() if body else ""
+   268→
+   269→        if status_code == 403:
+   270→            # Detect Cloudflare bot protection (error code 1010)
+   271→            if "error code: 1010" in (body or ""):
+   272→                return (
+   273→                    "CLOUDFLARE_BOT_PROTECTION: Request blocked by Cloudflare "
+   274→                    "anti-bot (error code 1010). NOT an auth failure — "
+   275→                    "User-Agent header missing or blocked. Should be retried "
+   276→                    "with a proper browser-like User-Agent."
+   277→                )
+   278→            if "invalid" in body_lower or "unauthorized" in body_lower:
+   279→                return "INVALID_CREDENTIALS: API key is rejected by the provider"
+   280→            elif "forbidden" in body_lower or "access denied" in body_lower:
+   281→                return "INSUFFICIENT_PERMISSIONS: Key lacks required scopes"
+   282→            elif "quota" in body_lower or "limit" in body_lower or "rate" in body_lower:
+   283→                return "QUOTA_EXCEEDED: Account has hit rate or usage limits"
+   284→            elif "sanction" in body_lower or "region" in body_lower or "embargo" in body_lower:
+   285→                return "REGION_BLOCKED: Provider blocks requests from certain regions"
+   286→            elif "expired" in body_lower:
+   287→                return "KEY_EXPIRED: API key has expired"
+   288→            else:
+   289→                return "AUTH_FAILURE: 403 Forbidden — likely invalid/expired key or insufficient permissions"
+   290→
+   291→        elif status_code == 400:
+   292→            if "model" in body_lower and ("not found" in body_lower or "invalid" in body_lower):
+   293→                return "INVALID_MODEL: The requested model ID is not available"
+   294→            elif "payload" in body_lower or "body" in body_lower:
+   295→                return "MALFORMED_REQUEST: Request payload is invalid"
+   296→            elif "header" in body_lower:
+   297→                return "HEADER_FORMAT_ERROR: Required header is missing or malformed"
+   298→            else:
+   299→                return "BAD_REQUEST: Malformed request or invalid parameters"
+   300→
+   301→        return f"HTTP_{status_code}: Unspecified error"
+   302→
+   303→
+   304→# ════════════════════════════════════════════════════════════════════════════
+   305→# ENVIRONMENT VARIABLE VALIDATOR
+   306→# ════════════════════════════════════════════════════════════════════════════
+   307→
+   308→class EnvVarValidator:
+   309→    """
+   310→    Validates that required environment variables are present and properly
+   311→    mapped from GitHub Secrets before attempting any API calls.
+   312→    """
+   313→
+   314→    PROVIDER_ENV_MAP = {
+   315→        "cerebras": {
+   316→            "required_patterns": ["CEREBRAS_API_KEY_{i}"],
+   317→            "min_keys": 1,
+   318→            "description": "At least one CEREBRAS_API_KEY_N needed",
+   319→        },
+   320→        "cloudflare_ai_gateway": {
+   321→            "required_patterns": ["CF_ACCOUNT_ID_{i}", "CF_API_TOKEN_{i}", "CF_AI_GATEWAY_URL_{i}"],
+   322→            "min_keys": 1,
+   323→            "description": "At least one set of CF_ACCOUNT_ID_N + CF_API_TOKEN_N + CF_AI_GATEWAY_URL_N needed",
+   324→        },
+   325→        "cloudflare_workers_ai": {
+   326→            "required_patterns": ["CF_ACCOUNT_ID_{i}", "CF_API_TOKEN_{i}"],
+   327→            "min_keys": 1,
+   328→            "description": "At least one set of CF_ACCOUNT_ID_N + CF_API_TOKEN_N needed",
+   329→        },
+   330→        "portkey": {
+   331→            "required_patterns": ["PORTKEY_API_KEY_{i}"],
+   332→            "min_keys": 1,
+   333→            "description": "At least one PORTKEY_API_KEY_N needed",
+   334→        },
+   335→    }
+   336→
+   337→    @classmethod
+   338→    def validate(cls, providers: List[str]) -> Dict[str, Any]:
+   339→        """
+   340→        Validate environment variables for the requested providers.
+   341→        Returns a report with which providers have valid env vars.
+   342→        """
+   343→        report = {
+   344→            "valid_providers": [],
+   345→            "invalid_providers": [],
+   346→            "details": {},
+   347→            "warnings": [],
+   348→        }
+   349→
+   350→        for provider in providers:
+   351→            config = cls.PROVIDER_ENV_MAP.get(provider)
+   352→            if not config:
+   353→                report["invalid_providers"].append(provider)
+   354→                report["details"][provider] = {
+   355→                    "status": "unknown_provider",
+   356→                    "message": f"No env var config defined for provider: {provider}",
+   357→                }
+   358→                continue
+   359→
+   360→            found_sets = 0
+   361→            slot_details = []
+   362→
+   363→            for i in range(1, 12):
+   364→                slot_vars = {}
+   365→                all_present = True
+   366→                for pattern in config["required_patterns"]:
+   367→                    var_name = pattern.replace("{i}", str(i))
+   368→                    value = os.environ.get(var_name, "")
+   369→                    slot_vars[var_name] = bool(value)
+   370→                    if not value:
+   371→                        all_present = False
+   372→
+   373→                if all_present:
+   374→                    found_sets += 1
+   375→                    slot_details.append({"slot": i, "status": "configured", "vars": slot_vars})
+   376→                elif any(slot_vars.values()):
+   377→                    # Partial configuration — some vars present but not all
+   378→                    missing = [k for k, v in slot_vars.items() if not v]
+   379→                    present = [k for k, v in slot_vars.items() if v]
+   380→                    slot_details.append({
+   381→                        "slot": i, "status": "partial",
+   382→                        "present": present, "missing": missing,
+   383→                    })
+   384→                    report["warnings"].append(
+   385→                        f"[{provider}] Slot {i} partially configured: "
+   386→                        f"has {present}, missing {missing}"
+   387→                    )
+   388→
+   389→            if found_sets >= config["min_keys"]:
+   390→                report["valid_providers"].append(provider)
+   391→                report["details"][provider] = {
+   392→                    "status": "ok",
+   393→                    "configured_slots": found_sets,
+   394→                    "slots": slot_details,
+   395→                }
+   396→            else:
+   397→                report["invalid_providers"].append(provider)
+   398→                report["details"][provider] = {
+   399→                    "status": "missing_env_vars",
+   400→                    "configured_slots": found_sets,
+   401→                    "required": config["description"],
+   402→                    "slots": slot_details,
+   403→                }
+   404→                report["warnings"].append(
+   405→                    f"[{provider}] {config['description']} — found {found_sets} slot(s)"
+   406→                )
+   407→
+   408→        return report
+   409→
+   410→
+   411→# ════════════════════════════════════════════════════════════════════════════
+   412→# MODEL SELECTOR CHECK
+   413→# ════════════════════════════════════════════════════════════════════════════
+   414→
+   415→def check_model_selector() -> dict:
+   416→    """Run model selector status check without making any AI calls."""
+   417→    from torshield_ai_gateway.model_selector import CloudflareModelSelector
+   418→    sel = CloudflareModelSelector.instance()
+   419→    try:
+   420→        ranked = sel.ranked_models(task="general", top_n=5)
+   421→        top = ranked[0] if ranked else None
+   422→        return {
+   423→            "status":   "ok",
+   424→            "total":    len(ranked),
+   425→            "top_model": top.id if top else "none",
+   426→            "top_score": top.score if top else 0.0,
+   427→            "top_5": [
+   428→                {"rank": i+1, "id": m.id, "score": m.score, "tier": m.tier}
+   429→                for i, m in enumerate(ranked)
+   430→            ],
+   431→        }
+   432→    except Exception as e:
+   433→        return {"status": "error", "error": str(e)[:300]}
+   434→
+   435→
+   436→# ════════════════════════════════════════════════════════════════════════════
+   437→# PROVIDER CHECK WITH RETRY + VERBOSE DIAGNOSTICS
+   438→# ════════════════════════════════════════════════════════════════════════════
+   439→
+   440→def check_provider(
+   441→    provider_name: str,
+   442→    task: str = "general",
+   443→    max_retries: int = 3,
+   444→) -> dict:
+   445→    """
+   446→    Check a single provider with exponential backoff retry.
+   447→
+   448→    Returns a detailed result dict including:
+   449→      - provider name, status, latency, response
+   450→      - retry_attempts, auth_diagnostics (on 403/400)
+   451→      - Whether this is a PRIMARY success or DEGRADED (LocalAIEngine)
+   452→    """
+   453→    from torshield_ai_gateway.gateway import TorShieldAIGateway
+   454→
+   455→    retry_engine = ExponentialBackoffRetry(
+   456→        max_retries=max_retries,
+   457→        base_delay_sec=1.0,
+   458→        max_delay_sec=15.0,  # Reduced from 30s to prevent timeout cascade
+   459→        jitter=0.5,
+   460→    )
+   461→
+   462→    result = {
+   463→        "provider": provider_name,
+   464→        "status": "pending",
+   465→        "latency_ms": 0,
+   466→        "response": "",
+   467→        "retry_attempts": 0,
+   468→        "auth_diagnostics": None,
+   469→        "is_primary": True,
+   470→    }
+   471→
+   472→    # Health check constants
+   473→    HEALTH_CHECK_PROMPT = "Reply with exactly the word: TORSHIELD_OK"
+   474→    HEALTH_CHECK_MAX_TOKENS: int = 256  # 256 tokens — enough for verbose/reasoning models
+   475→
+   476→    def _attempt_provider_call():
+   477→        """
+   478→        Call the provider DIRECTLY (not through the gateway waterfall).
+   479→        
+   480→        CRITICAL: We must NOT use gw.chat(preferred_provider=...) because
+   481→        the gateway waterfall will silently fall through to other providers
+   482→        when the preferred one fails. This means checking "portkey" would
+   483→        succeed via cerebras, giving a false "portkey OK" result.
+   484→        
+   485→        Instead, we instantiate the specific provider class and call its
+   486→        chat_complete() method directly. If it raises, the provider FAILED.
+   487→        """
+   488→        from torshield_ai_gateway.providers import (
+   489→            CerebrasProvider,
+   490→            CloudflareAIGatewayProvider,
+   491→            CloudflareWorkersAIProvider,
+   492→            PortkeyProvider,
+   493→        )
+   494→        _PROVIDER_MAP = {
+   495→            "cerebras":              CerebrasProvider,
+   496→            "cloudflare_ai_gateway": CloudflareAIGatewayProvider,
+   497→            "cloudflare_workers_ai": CloudflareWorkersAIProvider,
+   498→            "portkey":               PortkeyProvider,
+   499→        }
+   500→        
+   501→        provider_cls = _PROVIDER_MAP.get(provider_name)
+   502→        if provider_cls is None:
+   503→            raise ValueError(f"Unknown provider: {provider_name}")
+   504→        
+   505→        start = time.time()
+   506→        try:
+   507→            provider = provider_cls()
+   508→            response = provider.chat_complete(
+   509→                messages=[{"role": "user", "content": HEALTH_CHECK_PROMPT}],
+   510→                max_tokens=HEALTH_CHECK_MAX_TOKENS,
+   511→                temperature=0.0,
+   512→                task=task,
+   513→            )
+   514→            latency = time.time() - start
+   515→            # Since we called the provider directly (no gateway waterfall),
+   516→            # any non-empty response came from the PRIMARY provider.
+   517→            return {"response": response, "latency": latency, "response_source": "primary"}
+   518→        except ProviderConfigurationError as e:
+   519→            # Configuration errors are PERMANENT for this run — do NOT retry
+   520→            raise  # Let the outer handler catch this
+   521→        except Exception as e:
+   522→            latency = time.time() - start
+   523→            # Capture HTTP error details for diagnostics
+   524→            error_body = ""
+   525→            is_auth_error = False
+   526→            is_config_error = isinstance(e, ProviderConfigurationError)
+   527→            if isinstance(e, urllib.error.HTTPError):
+   528→                try:
+   529→                    error_body = e.read().decode("utf-8", errors="replace")[:500]
+   530→                except Exception:
+   531→                    pass
+   532→                # Auth errors (403/400/401) won't fix with retry
+   533→                if e.code in (400, 401, 403):
+   534→                    is_auth_error = True
+   535→            raise _ProviderCheckError(e, latency, error_body, is_auth_error, is_config_error)
+   536→
+   537→    class _ProviderCheckError(Exception):
+   538→        """Wrapper that carries latency, HTTP error body, auth error flag, and config error flag."""
+   539→        def __init__(self, original, latency, error_body="", is_auth_error=False, is_config_error=False):
+   540→            self.original = original
+   541→            self.latency = latency
+   542→            self.error_body = error_body
+   543→            self.is_auth_error = is_auth_error
+   544→            self.is_config_error = is_config_error
+   545→            super().__init__(str(original))
+   546→
+   547→    # Execute with smart retry — auth errors and config errors are NOT retried
+   548→    retry_result = None
+   549→    last_error = None
+   550→    is_config_error = False
+   551→    for attempt in range(max_retries + 1):
+   552→        try:
+   553→            retry_result = _attempt_provider_call()
+   554→            result["retry_attempts"] = attempt + 1
+   555→            break
+   556→        except ProviderConfigurationError as e:
+   557→            # Configuration errors: do NOT retry, report as SKIPPED
+   558→            logger.warning(
+   559→                f"  [{provider_name}] configuration error "
+   560→                f"(not retrying): {e}"
+   561→            )
+   562→            result["status"] = "skipped"
+   563→            result["error"] = str(e)[:300]
+   564→            result["retry_attempts"] = 1
+   565→            is_config_error = True
+   566→            break
+   567→        except _ProviderCheckError as e:
+   568→            last_error = e
+   569→            result["retry_attempts"] = attempt + 1
+   570→            # Config errors (e.g., all Portkey keys invalid) — do NOT retry
+   571→            if e.is_config_error:
+   572→                logger.warning(
+   573→                    f"  [{provider_name}] configuration error "
+   574→                    f"(not retrying): {e}"
+   575→                )
+   576→                result["status"] = "skipped"
+   577→                result["error"] = str(e.original)[:300]
+   578→                is_config_error = True
+   579→                break
+   580→            # Auth errors (403/400/401) won't fix themselves — stop retrying
+   581→            if e.is_auth_error:
+   582→                logger.warning(
+   583→                    f"  [{provider_name}] Auth error (HTTP 400/401/403) — "
+   584→                    f"NOT retrying (won't fix itself)"
+   585→                )
+   586→                break
+   587→            # Network errors — retry with backoff
+   588→            if attempt < max_retries:
+   589→                delay = retry_engine.compute_delay(attempt)
+   590→                logger.info(
+   591→                    f"  [{provider_name}] Network error — "
+   592→                    f"retry {attempt + 1}/{max_retries} in {delay:.1f}s: "
+   593→                    f"{str(e.original)[:100]}"
+   594→                )
+   595→                time.sleep(delay)
+   596→            else:
+   597→                logger.warning(
+   598→                    f"  [{provider_name}] All {max_retries + 1} attempts exhausted"
+   599→                )
+   600→        except Exception as e:
+   601→            last_error = _ProviderCheckError(e, 0, "", False, False)
+   602→            result["retry_attempts"] = attempt + 1
+   603→            if attempt < max_retries:
+   604→                delay = retry_engine.compute_delay(attempt)
+   605→                time.sleep(delay)
+   606→
+   607→    # If provider was skipped due to configuration error, return early
+   608→    if is_config_error:
+   609→        return result
+   610→
+   611→    if retry_result is not None:
+   612→        response = retry_result["response"]
+   613→        latency = retry_result["latency"]
+   614→        response_source = retry_result.get("response_source", "primary")
+   615→        result["latency_ms"] = round(latency * 1000)
+   616→
+   617→        # ── Evaluate provider response with robust validation ─────
+   618→        status, error_detail = _evaluate_provider_response(provider_name, response, response_source)
+   619→
+   620→        if status == "ok":
+   621→            result["status"] = "ok"
+   622→            result["response"] = response[:100]
+   623→        elif status == "degraded_local":
+   624→            result["status"] = "degraded_local"
+   625→            result["response"] = response[:200]
+   626→            result["is_primary"] = False
+   627→        elif status == "no_response":
+   628→            result["status"] = "no_response"
+   629→            result["response"] = ""
+   630→            result["is_primary"] = False
+   631→            logger.error(f"  [{provider_name}] NO_RESPONSE — {error_detail}")
+   632→        elif status == "wrong_response":
+   633→            result["status"] = "wrong_response"
+   634→            result["response"] = response[:200]
+   635→            result["is_primary"] = False
+   636→            logger.error(
+   637→                f"  [{provider_name}] WRONG_RESPONSE — {error_detail}"
+   638→            )
+   639→    else:
+   640→        # All retries failed
+   641→        result["status"] = "error"
+   642→        result["latency_ms"] = round((last_error.latency if hasattr(last_error, 'latency') else 0) * 1000)
+   643→
+   644→        if isinstance(last_error, _ProviderCheckError) and last_error.original:
+   645→            orig = last_error.original
+   646→            result["error"] = str(orig)[:300]
+   647→
+   648→            # Generate verbose auth diagnostics for 403/400 errors
+   649→            if isinstance(orig, urllib.error.HTTPError):
+   650→                if orig.code in (403, 400):
+   651→                    # Reconstruct what was sent for diagnostics
+   652→                    diag = _generate_provider_diagnostics(
+   653→                        provider_name, orig, last_error.error_body
+   654→                    )
+   655→                    result["auth_diagnostics"] = diag
+   656→
+   657→                    # Log the detailed diagnostics
+   658→                    logger.error(
+   659→                        f"  [{provider_name}] AUTH FAILURE DIAGNOSTICS:"
+   660→                    )
+   661→                    logger.error(
+   662→                        f"    HTTP {diag.get('http_status')} {diag.get('http_reason')}"
+   663→                    )
+   664→                    logger.error(
+   665→                        f"    Root cause: {diag.get('diagnosis')}"
+   666→                    )
+   667→                    for rec in diag.get("recommendations", [])[:3]:
+   668→                        logger.error(f"    → {rec}")
+   669→        else:
+   670→            result["error"] = str(last_error)[:300] if last_error else "Unknown error"
+   671→
+   672→    return result
+   673→
+   674→
+   675→def _evaluate_provider_response(
+   676→    provider: str,
+   677→    response_text: str,
+   678→    response_source: str = "primary",
+   679→) -> Tuple[str, Optional[str]]:
+   680→    """
+   681→    Evaluate a provider response with robust validation.
+   682→
+   683→    Returns (status, error_detail) where:
+   684→      status ∈ {"ok", "wrong_response", "no_response", "degraded_local"}
+   685→      error_detail is None when status == "ok"
+   686→
+   687→    Key distinction:
+   688→      - no_response: empty string → all slots failed (NOT wrong_response)
+   689→      - wrong_response: non-empty but doesn't contain TORSHIELD_OK
+   690→      - degraded_local: came from LocalAIEngine fallback
+   691→    """
+   692→    # If response came from LocalAIEngine, it's always degraded
+   693→    if response_source == "local_fallback":
+   694→        return ("degraded_local",
+   695→                f"Response from LocalAIEngine fallback, not primary provider")
+   696→
+   697→    # Empty string means no response was produced at all
+   698→    if not response_text or not response_text.strip():
+   699→        return ("no_response",
+   700→                f"Provider returned empty response — "
+   701→                f"all slots may have failed")
+   702→
+   703→    # Flexible matching: accept if TORSHIELD_OK appears anywhere in the
+   704→    # normalized response (some models add whitespace or newlines)
+   705→    if "TORSHIELD_OK" in response_text.upper().strip():
+   706→        if len(response_text.strip()) > 200:
+   707→            logger.warning(
+   708→                f"[{provider}] Response contains TORSHIELD_OK but is verbose "
+   709→                f"({len(response_text)} chars) — accepted but prompt should be tightened"
+   710→            )
+   711→        return ("ok", None)
+   712→
+   713→    # Non-empty but doesn't contain the sentinel → check if local engine
+   714→    if _is_local_engine_response(response_text):
+   715→        return ("degraded_local",
+   716→                f"Response from LocalAIEngine (heuristic detection), not primary")
+   717→
+   718→    # Non-empty, wrong content
+   719→    return ("wrong_response",
+   720→            f"got {repr(response_text[:120])}, "
+   721→            f"expected string containing 'TORSHIELD_OK'")
+   722→
+   723→
+   724→def _is_local_engine_response(response: str) -> bool:
+   725→    """Detect if a response came from LocalAIEngine."""
+   726→    local_indicators = [
+   727→        "bridge_score",
+   728→        "dpi_evasion",
+   729→        "censorship_level",
+   730→        "iran_reachability",
+   731→        "transport_recommendation",
+   732→        "nin_survival",
+   733→        "local_ai_engine",
+   734→        '"source": "local"',
+   735→    ]
+   736→    response_lower = response.lower()
+   737→    return any(indicator in response_lower for indicator in local_indicators)
+   738→
+   739→
+   740→def _generate_provider_diagnostics(
+   741→    provider_name: str,
+   742→    error: urllib.error.HTTPError,
+   743→    error_body: str,
+   744→) -> Dict[str, Any]:
+   745→    """Generate detailed diagnostics for a provider auth failure."""
+   746→    # Reconstruct approximate request details for diagnostics
+   747→    from torshield_ai_gateway.gateway import TorShieldAIGateway
+   748→
+   749→    url = ""
+   750→    headers = {}
+   751→
+   752→    try:
+   753→        if provider_name == "cerebras":
+   754→            url = "https://api.cerebras.ai/v1/chat/completions"
+   755→            import os
+   756→            key = os.environ.get("CEREBRAS_API_KEY_1", "")
+   757→            headers = {
+   758→                "Content-Type": "application/json",
+   759→                "Authorization": f"Bearer {AuthFailureDiagnostics.mask_key(key)}",
+   760→            }
+   761→        elif provider_name == "portkey":
+   762→            import os
+   763→            gw_url = os.environ.get("PORTKEY_GATEWAY_URL", "https://api.portkey.ai/v1")
+   764→            url = f"{gw_url}/chat/completions"
+   765→            key = os.environ.get("PORTKEY_API_KEY_1", "")
+   766→            headers = {
+   767→                "Content-Type": "application/json",
+   768→                "x-portkey-api-key": AuthFailureDiagnostics.mask_key(key),
+   769→                "x-portkey-provider": "openai",
+   770→            }
+   771→        elif provider_name == "cloudflare_ai_gateway":
+   772→            import os
+   773→            acct = os.environ.get("CF_ACCOUNT_ID_1", "")
+   774→            gw_url = os.environ.get("CF_AI_GATEWAY_URL_1", "")
+   775→            url = f"{gw_url}/workers-ai/{acct}/@cf/meta/llama-3.1-8b-instruct"
+   776→            token = os.environ.get("CF_API_TOKEN_1", "")
+   777→            headers = {
+   778→                "Content-Type": "application/json",
+   779→                "Authorization": f"Bearer {AuthFailureDiagnostics.mask_key(token)}",
+   780→            }
+   781→        elif provider_name == "cloudflare_workers_ai":
+   782→            import os
+   783→            acct = os.environ.get("CF_ACCOUNT_ID_1", "")
+   784→            url = f"https://api.cloudflare.com/client/v4/accounts/{AuthFailureDiagnostics.mask_key(acct, 3)}/ai/run/@cf/meta/llama-3.1-8b-instruct"
+   785→            token = os.environ.get("CF_API_TOKEN_1", "")
+   786→            headers = {
+   787→                "Content-Type": "application/json",
+   788→                "Authorization": f"Bearer {AuthFailureDiagnostics.mask_key(token)}",
+   789→            }
+   790→    except Exception as e:
+   791→        logger.debug(f"Diagnostic reconstruction error: {e}")
+   792→
+   793→    return AuthFailureDiagnostics.diagnose_http_error(
+   794→        error=error,
+   795→        provider=provider_name,
+   796→        url=url,
+   797→        headers_sent=headers,
+   798→        response_body=error_body,
+   799→    )
+   800→
+   801→
+   802→# ════════════════════════════════════════════════════════════════════════════
+   803→# MAIN
+   804→# ════════════════════════════════════════════════════════════════════════════
+   805→
+   806→def main():
+   807→    parser = argparse.ArgumentParser(
+   808→        description="AI Gateway Health Check v11.0 — Ultra-Quantum Edition"
+   809→    )
+   810→    parser.add_argument("--output", default="gateway_health_report.json")
+   811→    parser.add_argument("--task", default="general",
+   812→        choices=["general", "reasoning", "coding", "vision", "fast"])
+   813→    parser.add_argument("--providers", nargs="+",
+   814→        default=["cerebras", "cloudflare_ai_gateway",
+   815→                 "cloudflare_workers_ai", "portkey"])
+   816→    parser.add_argument("--max-retries", type=int, default=2,
+   817→        help="Max retry attempts per provider (default: 2, was 3)")
+   818→    parser.add_argument("--skip-env-check", action="store_true",
+   819→        help="Skip environment variable validation step")
+   820→    args = parser.parse_args()
+   821→
+   822→    report = {
+   823→        "version": "12.0-ultra-quantum",
+   824→        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+   825→        "run_id": os.environ.get("GITHUB_RUN_ID", "local"),
+   826→        "model_selector": {},
+   827→        "env_validation": {},
+   828→        "results": [],
+   829→        "summary": {},
+   830→    }
+   831→
+   832→    # ── Step 1: Environment Variable Validation ────────────────────────────
+   833→    if not args.skip_env_check:
+   834→        logger.info("═══ Step 1: Validating Environment Variables ═══")
+   835→        env_report = EnvVarValidator.validate(args.providers)
+   836→        report["env_validation"] = env_report
+   837→
+   838→        if env_report["valid_providers"]:
+   839→            logger.info(
+   840→                f"  ✓ Providers with valid env vars: "
+   841→                f"{env_report['valid_providers']}"
+   842→            )
+   843→        if env_report["invalid_providers"]:
+   844→            logger.warning(
+   845→                f"  ✗ Providers with MISSING env vars: "
+   846→                f"{env_report['invalid_providers']}"
+   847→            )
+   848→        for warning in env_report["warnings"]:
+   849→            logger.warning(f"  ⚠ {warning}")
+   850→
+   851→        # If NO providers have valid env vars, exit immediately with code 2
+   852→        if not env_report["valid_providers"]:
+   853→            logger.error(
+   854→                "CRITICAL: No providers have valid environment variables. "
+   855→                "Check GitHub Secrets mapping."
+   856→            )
+   857→            report["summary"] = {
+   858→                "total": len(args.providers),
+   859→                "ok": 0,
+   860→                "degraded": len(args.providers),
+   861→                "healthy": False,
+   862→                "primary_ok": 0,
+   863→                "exit_code": 2,
+   864→                "failure_reason": "ALL_PROVIDERS_MISSING_ENV_VARS",
+   865→            }
+   866→            with open(args.output, "w") as f:
+   867→                json.dump(report, f, indent=2)
+   868→            sys.exit(2)
+   869→    else:
+   870→        logger.info("Skipping environment variable validation (--skip-env-check)")
+   871→
+   872→    # ── Step 2: Model Selector Status ──────────────────────────────────────
+   873→    logger.info("═══ Step 2: Checking Model Selector ═══")
+   874→    ms_result = check_model_selector()
+   875→    report["model_selector"] = ms_result
+   876→    if ms_result.get("status") == "ok":
+   877→        logger.info(
+   878→            f"  ✓ Model selector OK — top: {ms_result['top_model']} "
+   879→            f"(score={ms_result['top_score']})"
+   880→        )
+   881→        for entry in ms_result.get("top_5", []):
+   882→            logger.info(
+   883→                f"    #{entry['rank']} {entry['id']} "
+   884→                f"score={entry['score']} tier={entry['tier']}"
+   885→            )
+   886→    else:
+   887→        logger.warning(f"  ⚠ Model selector error: {ms_result.get('error')}")
+   888→
+   889→    # ── Step 3: Provider Checks with Retry ─────────────────────────────────
+   890→    logger.info(f"═══ Step 3: Checking Providers (max_retries={args.max_retries}) ═══")
+   891→    ok_count = 0
+   892→    primary_ok_count = 0
+   893→    degraded_count = 0
+   894→    skipped_count = 0
+   895→    error_count = 0
+   896→
+   897→    for pname in args.providers:
+   898→        logger.info(f"─── Checking {pname} [task={args.task}] ───")
+   899→        result = check_provider(pname, task=args.task, max_retries=args.max_retries)
+   900→        report["results"].append(result)
+   901→
+   902→        if result["status"] == "ok":
+   903→            ok_count += 1
+   904→            primary_ok_count += 1
+   905→            logger.info(
+   906→                f"  ✓ {pname} OK ({result['latency_ms']}ms, "
+   907→                f"attempts={result['retry_attempts']})"
+   908→            )
+   909→        elif result["status"] == "degraded_local":
+   910→            degraded_count += 1
+   911→            logger.warning(
+   912→                f"  ⚠ {pname} DEGRADED — fell back to LocalAIEngine"
+   913→            )
+   914→        elif result["status"] == "skipped":
+   915→            skipped_count += 1
+   916→            logger.info(
+   917→                f"  ⊘ {pname} SKIPPED (configuration: "
+   918→                f"{result.get('error', 'unknown')[:100]})"
+   919→            )
+   920→        elif result["status"] == "no_response":
+   921→            error_count += 1
+   922→            logger.error(
+   923→                f"  ✗ {pname} NO_RESPONSE — all slots may have failed"
+   924→            )
+   925→        elif result["status"] == "wrong_response":
+   926→            error_count += 1  # WRONG_RESPONSE is a FAILURE, not degraded
+   927→            logger.error(
+   928→                f"  ✗ {pname} WRONG_RESPONSE — primary provider returned "
+   929→                f"unexpected content (TREATED AS FAILURE)"
+   930→            )
+   931→        else:
+   932→            error_count += 1
+   933→            logger.error(
+   934→                f"  ✗ {pname} ERROR ({result.get('latency_ms', 0)}ms, "
+   935→                f"attempts={result['retry_attempts']}): "
+   936→                f"{result.get('error', 'unknown')[:150]}"
+   937→            )
+   938→            # Log detailed auth diagnostics if available
+   939→            if result.get("auth_diagnostics"):
+   940→                diag = result["auth_diagnostics"]
+   941→                logger.error(f"  Auth Diagnostics for {pname}:")
+   942→                logger.error(f"     Root Cause: {diag.get('diagnosis')}")
+   943→                for rec in diag.get("recommendations", []):
+   944→                    logger.error(f"     -> {rec}")
+   945→
+   946→    # ── Step 4: Summary and Exit Decision ──────────────────────────────────
+   947→    logger.info("═══ Step 4: Health Summary ═══")
+   948→
+   949→    summary = {
+   950→        "total": len(args.providers),
+   951→        "ok": ok_count,
+   952→        "degraded": degraded_count,
+   953→        "skipped": skipped_count,
+   954→        "error": error_count,
+   955→        "primary_ok": primary_ok_count,
+   956→        "healthy": primary_ok_count > 0,
+   957→        "all_primary_failed": primary_ok_count == 0,
+   958→    }
+   959→
+   960→    # Exit code policy:
+   961→    #   - "ok" → success
+   962→    #   - "skipped" → expected absence (config issue known, NOT a failure)
+   963→    #   - "degraded" → partial success (LocalAIEngine only)
+   964→    #   - "error" / "wrong_response" / "no_response" → real failure
+   965→    # Exit 0 if at least 1 provider is healthy (ok or degraded)
+   966→    # Exit 0 if ALL unhealthy providers are "skipped" (config issues, not failures)
+   967→    # Exit 1 if any provider has a real error and no provider is healthy
+   968→    healthy_count = ok_count + degraded_count
+   969→    exit_code = 0 if (healthy_count >= 1 or error_count == 0) else 1
+   970→    summary["exit_code"] = exit_code
+   971→
+   972→    if primary_ok_count > 0:
+   973→        summary["failure_reason"] = None
+   974→        logger.info(
+   975→            f"  ✓ HEALTHY: {primary_ok_count}/{len(args.providers)} "
+   976→            f"primary providers OK"
+   977→        )
+   978→    elif healthy_count > 0 and error_count == 0:
+   979→        summary["failure_reason"] = None
+   980→        logger.info(
+   981→            f"  DEGRADED-ONLY: No primary OK, but no hard errors "
+   982→            f"({degraded_count} degraded, {skipped_count} skipped)"
+   983→        )
+   984→    else:
+   985→        # Real failures exist
+   986→        if error_count > 0:
+   987→            summary["failure_reason"] = "PROVIDER_ERRORS"
+   988→            logger.error(
+   989→                f"  CRITICAL: {error_count} provider(s) with hard errors. "
+   990→                f"{primary_ok_count} primary OK, "
+   991→                f"{skipped_count} skipped (config), "
+   992→                f"{degraded_count} degraded."
+   993→            )
+   994→        elif degraded_count > 0:
+   995→            summary["failure_reason"] = "ALL_PRIMARY_FAILED_LOCAL_ONLY"
+   996→            logger.error(
+   997→                f"  CRITICAL: No primary providers available. "
+   998→                f"LocalAIEngine is the only fallback ({degraded_count} degraded). "
+   999→                f"This is NOT acceptable for production."
+  1000→            )
+  1001→        else:
+  1002→            summary["failure_reason"] = "ALL_PROVIDERS_COMPLETELY_FAILED"
+  1003→            logger.error(
+  1004→                f"  CRITICAL: All {len(args.providers)} providers completely failed. "
+  1005→                f"Even LocalAIEngine could not help."
+  1006→            )
+  1007→
+  1008→    report["summary"] = summary
+  1009→
+  1010→    with open(args.output, "w") as f:
+  1011→        json.dump(report, f, indent=2)
+  1012→
+  1013→    logger.info(f"Health report saved to: {args.output}")
+  1014→    logger.info(
+  1015→        f"Result: {healthy_count} primary OK, "
+  1016→        f"{skipped_count} skipped (config), "
+  1017→        f"{error_count} error — exit code: {exit_code}"
+  1018→    )
+  1019→
+  1020→    sys.exit(exit_code)
+  1021→
+  1022→
+  1023→if __name__ == "__main__":
+  1024→    main()
+  1025→

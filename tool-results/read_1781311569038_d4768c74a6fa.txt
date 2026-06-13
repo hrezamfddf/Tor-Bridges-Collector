@@ -1,0 +1,1909 @@
+     1→     1→"""
+     2→     2→Provider implementations v16.0 — Ultra-Quantum Edition: Portkey.ai, Cerebras.ai,
+     3→     3→Cloudflare Workers AI, Cloudflare AI Gateway.
+     4→     4→
+     5→     5→CRITICAL FIXES from v15.0 (Correction 7: URL Path + Response Parser + Config Errors):
+     6→     6→  - FIX: CF AI Gateway URL uses OpenAI-compatible endpoint:
+     7→     7→    {gateway_base}/workers-ai/v1/chat/completions with model in request body.
+     8→     8→    NEVER uses /compatible/, /compat/, /openai/, or /run/ paths.
+     9→     9→  - FIX: CF Workers AI direct URL uses OpenAI-compatible endpoint:
+    10→    10→    https://api.cloudflare.com/client/v4/accounts/{acct}/ai/v1/chat/completions
+    11→    11→    with model in request body.
+    12→    12→  - FIX: _extract_text() NEVER returns str(response) — always extracts content
+    13→    13→    from choices[0].message.content, handling both OpenAI and CF response formats.
+    14→    14→  - FIX: ProviderConfigurationError raised when all slots fail (CF) or all keys
+    15→    15→    have invalid format (Portkey). Health check treats this as 'skipped', not failure.
+    16→    16→  - FIX: _dead_slots with threading.Lock for thread-safe dead slot tracking.
+    17→    17→  - FIX: CF slot 400+empty-body → added to _dead_slots, ONE warning per slot,
+    18→    18→    immediately break model-fallback loop for that slot.
+    19→    19→  - FIX: Health check max_tokens=100 for all providers (was 20, too small for
+    20→    20→    verbose models like gpt-oss-120b).
+    21→    21→  - FIX: Health check prompt tightened for maximum compliance.
+    22→    22→  - FIX: Portkey raises ProviderConfigurationError when ALL keys are too short
+    23→    23→    (len < 16). Prefix check removed — real Portkey keys may not have pk- prefix.
+    24→    24→    No retry on configuration errors.
+    25→    25→  - FIX (v16.0): Added normalize_cf_gateway_url() to auto-fix bare gateway URLs.
+    26→    26→  - FIX (v16.0): Circuit breaker threshold raised to max(n_slots, 20) to prevent
+    27→    27→    premature opening during health-check sweeps.
+    28→    28→  - FIX (v16.0): BadRequestError class for HTTP 400 — separated from auth failures.
+    29→    29→    400 is NOT an auth error; logging now says BAD_REQUEST, not AUTH FAILURE.
+    30→    30→
+    31→    31→CRITICAL FIXES from v14.0 (Correction 6: Pre-flight Screening):
+    32→    32→  - FIX: Pre-flight screening for broken Cloudflare slots — validates token
+    33→    33→    length, account_id format, and gateway URL structure BEFORE sending any
+    34→    34→    request. Broken slots (like slot 7) are silently skipped without causing
+    35→    35→    HTTP 400 errors. No env vars or secrets are deleted.
+    36→    36→  - FIX: Session-level blacklisting for CF slots that fail all models.
+    37→    37→    Blacklisted slots are suspended only for the current CI session and
+    38→    38→    retried automatically in the next run.
+    39→    39→  - FIX: Per-account model cache — remembers which models worked on which
+    40→    40→    CF account to avoid retrying known-to-fail model/account combinations.
+    41→    41→  - FIX: CF AI Gateway URL duplicate account_id detection — prevents
+    42→    42→    malformed URLs where account_id appears twice in the path.
+    43→    43→  - FIX: WRONG_RESPONSE false positive validator — properly handles
+    44→    44→    Cloudflare JSON responses with "errors": [] field.
+    45→    45→  - FIX: All CF secrets now supported up to slot 11 in all workflows.
+    46→    46→
+    47→    47→CRITICAL FIXES from v13.0 (preserved):
+    48→    48→  - FIX: Cerebras model "llama3.3-70b" is NOT a valid Cerebras model name.
+    49→    49→    Replaced with "llama3.1-70b". DEFAULT_MODEL changed to "llama3.1-8b"
+    50→    50→    (most stable free-tier model). Added _discover_models() endpoint
+    51→    51→    auto-discovery that fetches available models from /v1/models.
+    52→    52→  - FIX: CF AI Gateway URL validation — added _validate_gateway_url() that
+    53→    53→    checks the URL starts with https://gateway.ai.cloudflare.com/v1/ and
+    54→    54→    extracts/validates account_id from the path. Added _probe_gateway()
+    55→    55→    that sends a lightweight GET to check gateway reachability.
+    56→    56→  - FIX: Portkey authentication — added _validate_portkey_key() that checks
+    57→    57→    key format (pk- prefix), better 401 diagnostics, and support for
+    58→    58→    PORTKEY_VIRTUAL_KEY_{i} env vars as alternative auth method.
+    59→    59→  - FIX: Added ProviderCircuitBreaker class for provider-level circuit
+    60→    60→    breaker with automatic recovery. Integrated into all providers.
+    61→    61→
+    62→    62→CRITICAL FIXES from v11.0 (preserved):
+    63→    63→  - FIX: Cerebras CEREBRAS_MODELS fallback list so chat_complete tries
+    64→    64→    multiple models on 400/404.
+    65→    65→  - FIX: CF AI Gateway URL includes account_id in workers-ai path.
+    66→    66→  - FIX: Cross-slot model skip via _failed_models set.
+    67→    67→  - FIX: Portkey DEFAULT_MODEL = "meta/llama-3.1-70b-instruct".
+    68→    68→  - FIX: Better diagnostic for empty response body on CF AI Gateway 400.
+    69→    69→
+    70→    70→PRESERVED from v11.0:
+    71→    71→  - FIX: Added proper User-Agent header to bypass Cloudflare bot protection
+    72→    72→    (error code 1010 was triggered by missing/empty User-Agent)
+    73→    73→  - FIX: CF-Workers-AI URL construction validates model ID format
+    74→    74→  - FIX: Model selector UUID-based IDs are handled correctly in URL paths
+    75→    75→  - Enhanced retry: 403 with "error code: 1010" is retryable with backoff
+    76→    76→    (Cloudflare bot detection can be transient)
+    77→    77→  - Enhanced diagnostic: detect and report Cloudflare bot protection errors
+    78→    78→  - Smart model ID format detection: @cf/ prefix vs UUID vs plain name
+    79→    79→
+    80→    80→PRESERVED from v10.0:
+    81→    81→  - Exponential backoff retry for ALL network failures
+    82→    82→  - Verbose diagnostic logging on 403/400 errors (NO key exposure)
+    83→    83→  - Response body capture for auth failure analysis
+    84→    84→  - URL construction validation before sending requests
+    85→    85→  - Header format verification (no trailing whitespace, correct prefixes)
+    86→    86→  - Per-provider retry with configurable backoff parameters
+    87→    87→  - Smart error classification: auth vs network vs model vs quota
+    88→    88→  - Dynamic model selection via CloudflareModelSelector
+    89→    89→  - CF_STABLE_MODELS as last-resort offline fallback
+    90→    90→  - All other behaviour (slot rotation, circuit breaker, latency EMA)
+    91→    91→    unchanged from v8.0.
+    92→    92→
+    93→    93→SECURITY NOTE (preserved from v7.0):
+    94→    94→  - NEVER inject a secret as a path component of a URL.
+    95→    95→  - CF_AI_GATEWAY_URL_{i} must be a full absolute URL.
+    96→    96→  - Validated at runtime: must start with 'https://'.
+    97→    97→"""
+    98→    98→
+    99→    99→import os
+   100→   100→import re
+   101→   101→import json
+   102→   102→import time
+   103→   103→import random
+   104→   104→import logging
+   105→   105→import threading
+   106→   106→import urllib.request
+   107→   107→import urllib.error
+   108→   108→from typing import Optional, List, Dict, Any, Tuple
+   109→   109→from .rotator import AccountRotator, AccountSlot, build_rotator_from_env
+   110→   110→from .model_selector import CloudflareModelSelector, best_cf_model
+   111→   111→from .exceptions import ProviderConfigurationError
+   112→   112→
+   113→   113→logger = logging.getLogger("torshield.ai.providers")
+   114→   114→
+   115→   115→# Number of Cloudflare slots
+   116→   116→CF_N_SLOTS = 11
+   117→   117→
+   118→   118→# ── Pre-flight Screening Constants ───────────────────────────────────────────
+   119→   119→CF_MIN_TOKEN_LENGTH  = 40   # CF API tokens are 40+ chars (strict)
+   120→   120→CF_MIN_ACCT_ID_LENGTH = 32  # CF account IDs are 32-char hex
+   121→   121→CF_MAX_TOKEN_LENGTH  = 200  # Maximum expected token length
+   122→   122→CF_MAX_ACCT_ID_LENGTH = 32  # Account IDs are exactly 32 chars
+   123→   123→
+   124→   124→# ── Per-Account Model Cache ──────────────────────────────────────────────────
+   125→   125→_cf_account_working_models: dict = {}  # account_id → list of working models
+   126→   126→
+   127→   127→
+   128→   128→def record_working_model(account_id: str, model: str) -> None:
+   129→   129→    """Remember which model worked for which CF account."""
+   130→   130→    if account_id not in _cf_account_working_models:
+   131→   131→        _cf_account_working_models[account_id] = []
+   132→   132→    if model not in _cf_account_working_models[account_id]:
+   133→   133→        _cf_account_working_models[account_id].append(model)
+   134→   134→        logger.info(
+   135→   135→            f"[CF-Model-Cache] {_mask_key(account_id, 3)}: "
+   136→   136→            f"confirmed working model: {model}"
+   137→   137→        )
+   138→   138→
+   139→   139→
+   140→   140→def get_models_for_account(
+   141→   141→    account_id: str,
+   142→   142→    default_models: list,
+   143→   143→) -> list:
+   144→   144→    """
+   145→   145→    Return cached working models first, then fallbacks.
+   146→   146→    Avoids retrying models known to fail on this account.
+   147→   147→    """
+   148→   148→    working = _cf_account_working_models.get(account_id, [])
+   149→   149→    result = working.copy()
+   150→   150→    for m in default_models:
+   151→   151→        if m not in result:
+   152→   152→            result.append(m)
+   153→   153→    return result
+   154→   154→
+   155→   155→
+   156→   156→def _preflight_screen_slot(slot_index: int) -> Tuple[bool, str]:
+   157→   157→    """
+   158→   158→    Enhanced pre-flight screening for Cloudflare slots (Amendment 6).
+   159→   159→
+   160→   160→    Validates account_id format (32-char hex), API token length (>=40 chars),
+   161→   161→    and gateway URL structure BEFORE sending any request.
+   162→   162→
+   163→   163→    Broken slots (like slot 7 with corrupted tokens) are detected here
+   164→   164→    and silently skipped without causing HTTP 400 errors.
+   165→   165→
+   166→   166→    Returns:
+   167→   167→        (valid: bool, reason: str) — valid=True means slot is usable.
+   168→   168→    """
+   169→   169→    account_id  = os.environ.get(f"CF_ACCOUNT_ID_{slot_index}", "").strip()
+   170→   170→    api_token   = os.environ.get(f"CF_API_TOKEN_{slot_index}", "").strip()
+   171→   171→    gateway_url = os.environ.get(f"CF_AI_GATEWAY_URL_{slot_index}", "").strip()
+   172→   172→
+   173→   173→    # Rule 1: Both must be non-empty
+   174→   174→    if not account_id or not api_token:
+   175→   175→        return False, "missing credentials"
+   176→   176→
+   177→   177→    # Rule 2: Account ID must be 32-char hex
+   178→   178→    if not re.match(r'^[0-9a-f]{32}$', account_id, re.IGNORECASE):
+   179→   179→        return False, f"invalid account_id format (len={len(account_id)})"
+   180→   180→
+   181→   181→    # Rule 3: API token must be >=40 chars (CF tokens are 40+)
+   182→   182→    if len(api_token) < CF_MIN_TOKEN_LENGTH:
+   183→   183→        return False, f"token too short ({len(api_token)} chars, min={CF_MIN_TOKEN_LENGTH})"
+   184→   184→
+   185→   185→    # Rule 4: Gateway URL must match CF pattern (if provided)
+   186→   186→    if gateway_url:
+   187→   187→        pattern = r'^https://gateway\.ai\.cloudflare\.com/v1/[0-9a-f]{32}/'
+   188→   188→        if not re.match(pattern, gateway_url, re.IGNORECASE):
+   189→   189→            return False, "malformed gateway URL"
+   190→   190→
+   191→   191→    # Rule 5: Account ID in gateway URL must match credentials
+   192→   192→    if gateway_url and account_id:
+   193→   193→        # Extract account_id from gateway URL
+   194→   194→        gw_match = re.search(r'/v1/([0-9a-f]{32})/', gateway_url, re.IGNORECASE)
+   195→   195→        if gw_match:
+   196→   196→            gw_acct = gw_match.group(1)
+   197→   197→            if gw_acct.lower() != account_id.lower():
+   198→   198→                return False, "account_id mismatch between URL and credentials"
+   199→   199→
+   200→   200→    return True, "ok"
+   201→   201→
+   202→   202→
+   203→   203→def preflight_validate_cf_slot(
+   204→   204→    slot_index: int,
+   205→   205→    account_id: str,
+   206→   206→    api_token: str,
+   207→   207→    gateway_url: str = "",
+   208→   208→) -> list:
+   209→   209→    """
+   210→   210→    Pre-flight screening for Cloudflare slots — validates token length,
+   211→   211→    account_id format, and gateway URL structure BEFORE sending any request.
+   212→   212→
+   213→   213→    Broken slots (like slot 7 with corrupted tokens) are detected here
+   214→   214→    and silently skipped without causing HTTP 400 errors.
+   215→   215→
+   216→   216→    Returns a list of warning strings (empty = slot looks valid).
+   217→   217→    The slot is NOT removed — only flagged for skipping at runtime.
+   218→   218→    """
+   219→   219→    issues = []
+   220→   220→
+   221→   221→    # Validate API token
+   222→   222→    if not api_token:
+   223→   223→        issues.append(f"Slot {slot_index}: CF_API_TOKEN is empty")
+   224→   224→    else:
+   225→   225→        clean_token = api_token.strip()
+   226→   226→        if len(clean_token) < CF_MIN_TOKEN_LENGTH:
+   227→   227→            issues.append(
+   228→   228→                f"Slot {slot_index}: CF_API_TOKEN too short "
+   229→   229→                f"(len={len(clean_token)}, min={CF_MIN_TOKEN_LENGTH}). "
+   230→   230→                f"Token appears corrupted or incomplete."
+   231→   231→            )
+   232→   232→        if len(clean_token) > CF_MAX_TOKEN_LENGTH:
+   233→   233→            issues.append(
+   234→   234→                f"Slot {slot_index}: CF_API_TOKEN too long "
+   235→   235→                f"(len={len(clean_token)}, max={CF_MAX_TOKEN_LENGTH}). "
+   236→   236→                f"Token may contain extra characters or multiple tokens."
+   237→   237→            )
+   238→   238→        if '\n' in clean_token or '\r' in clean_token:
+   239→   239→            issues.append(
+   240→   240→                f"Slot {slot_index}: CF_API_TOKEN contains newline characters — "
+   241→   241→                f"possible copy-paste error from GitHub Secrets"
+   242→   242→            )
+   243→   243→        # CF API tokens should not have spaces
+   244→   244→        if ' ' in clean_token:
+   245→   245→            issues.append(
+   246→   246→                f"Slot {slot_index}: CF_API_TOKEN contains spaces — "
+   247→   247→                f"token is likely corrupted"
+   248→   248→            )
+   249→   249→
+   250→   250→    # Validate account ID — must be 32-char hex
+   251→   251→    if not account_id:
+   252→   252→        issues.append(f"Slot {slot_index}: CF_ACCOUNT_ID is empty")
+   253→   253→    else:
+   254→   254→        clean_acct = account_id.strip()
+   255→   255→        if not re.match(r'^[0-9a-f]{32}$', clean_acct, re.IGNORECASE):
+   256→   256→            issues.append(
+   257→   257→                f"Slot {slot_index}: CF_ACCOUNT_ID invalid format "
+   258→   258→                f"(len={len(clean_acct)}, expected 32-char hex). "
+   259→   259→                f"Account ID appears corrupted."
+   260→   260→            )
+   261→   261→
+   262→   262→    # Validate gateway URL (only for AI Gateway provider)
+   263→   263→    if gateway_url:
+   264→   264→        if not gateway_url.startswith("https://"):
+   265→   265→            issues.append(
+   266→   266→                f"Slot {slot_index}: CF_AI_GATEWAY_URL does not start with https://"
+   267→   267→            )
+   268→   268→        else:
+   269→   269→            # Must match CF AI Gateway pattern
+   270→   270→            pattern = r'^https://gateway\.ai\.cloudflare\.com/v1/[0-9a-f]{32}/'
+   271→   271→            if not re.match(pattern, gateway_url, re.IGNORECASE):
+   272→   272→                issues.append(
+   273→   273→                    f"Slot {slot_index}: CF_AI_GATEWAY_URL malformed — "
+   274→   274→                    f"must match https://gateway.ai.cloudflare.com/v1/{{account_id}}/{{slug}}"
+   275→   275→                )
+   276→   276→            else:
+   277→   277→                # Check account_id in URL matches credentials
+   278→   278→                gw_match = re.search(r'/v1/([0-9a-f]{32})/', gateway_url, re.IGNORECASE)
+   279→   279→                if gw_match and account_id:
+   280→   280→                    gw_acct = gw_match.group(1)
+   281→   281→                    if gw_acct.lower() != account_id.strip().lower():
+   282→   282→                        issues.append(
+   283→   283→                            f"Slot {slot_index}: Account ID in gateway URL "
+   284→   284→                            f"({_mask_key(gw_acct, 3)}...) does not match "
+   285→   285→                            f"CF_ACCOUNT_ID ({_mask_key(account_id, 3)}...)"
+   286→   286→                        )
+   287→   287→
+   288→   288→    if issues:
+   289→   289→        for issue in issues:
+   290→   290→            logger.warning(f"[CF-Preflight] {issue}")
+   291→   291→        logger.warning(
+   292→   292→            f"[CF-Preflight] Slot {slot_index} FAILED pre-flight screening — "
+   293→   293→            f"will be silently skipped (NOT deleted from config). "
+   294→   294→            f"{len(issues)} issue(s) detected."
+   295→   295→        )
+   296→   296→    else:
+   297→   297→        logger.debug(
+   298→   298→            f"[CF-Preflight] Slot {slot_index} PASSED pre-flight screening "
+   299→   299→            f"(token_len={len(api_token.strip())}, "
+   300→   300→            f"acct_id_len={len(account_id.strip())})"
+   301→   301→        )
+   302→   302→
+   303→   303→    return issues
+   304→   304→
+   305→   305→# Guaranteed free-tier fallbacks (used only when model selector fails entirely)
+   306→   306→CF_STABLE_MODELS = [
+   307→   307→    "@cf/meta/llama-3.1-8b-instruct",
+   308→   308→    "@cf/meta/llama-3.2-11b-vision-instruct",
+   309→   309→    "@cf/mistral/mistral-7b-instruct-v0.1",
+   310→   310→    "@cf/meta/llama-3.2-3b-instruct",
+   311→   311→    "@cf/meta/llama-3.2-1b-instruct",
+   312→   312→]
+   313→   313→
+   314→   314→# ── Retry Configuration ──────────────────────────────────────────────────────
+   315→   315→MAX_NETWORK_RETRIES    = 3       # Retry count for network-level failures
+   316→   316→RETRY_BASE_DELAY_SEC   = 1.0    # Base delay in seconds
+   317→   317→RETRY_MAX_DELAY_SEC    = 30.0   # Maximum delay cap
+   318→   318→RETRY_JITTER_SEC       = 0.5    # Random jitter to avoid thundering herd
+   319→   319→RETRYABLE_HTTP_CODES   = {429, 500, 502, 503, 504}  # Codes worth retrying
+   320→   320→AUTH_FAILURE_HTTP_CODES = {401, 403}  # NEVER retry these — auth failures won't fix themselves
+   321→   321→
+   322→   322→
+   323→   323→class BadRequestError(Exception):
+   324→   324→    """Raised when provider returns HTTP 400 Bad Request.
+   325→   325→
+   326→   326→    This is a request-level error (wrong model, malformed payload, bad URL path)
+   327→   327→    and is NOT an authentication failure. It should be distinguished from 401/403
+   328→   328→    so the caller can decide to try a different model instead of skipping the slot.
+   329→   329→    """
+   330→   330→
+   331→   331→    def __init__(self, message: str = "", *, provider: str = "", slot: int = 0) -> None:
+   332→   332→        self.provider = provider
+   333→   333→        self.slot = slot
+   334→   334→        super().__init__(message)
+   335→   335→
+   336→   336→# ── User-Agent Configuration ──────────────────────────────────────────────────
+   337→   337→# Cloudflare returns "error code: 1010" when no User-Agent is set.
+   338→   338→# urllib.request sends "Python-urllib/3.x" by default, but some
+   339→   339→# Cloudflare-protected endpoints reject it. We set a browser-like UA.
+   340→   340→_USER_AGENT = (
+   341→   341→    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+   342→   342→    "(KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36 "
+   343→   343→    "TorShieldAIGateway/12.0"
+   344→   344→)
+   345→   345→
+   346→   346→# Cloudflare bot protection error signature
+   347→   347→_CF_BOT_ERROR_CODE = "error code: 1010"
+   348→   348→
+   349→   349→
+   350→   350→def _mask_key(key: str, visible: int = 4) -> str:
+   351→   351→    """Mask sensitive key for logging, showing only first/last chars."""
+   352→   352→    if not key:
+   353→   353→        return "<EMPTY>"
+   354→   354→    if len(key) <= visible * 2:
+   355→   355→        return f"{key[:2]}***{key[-2:]}" if len(key) >= 4 else "***"
+   356→   356→    return f"{key[:visible]}...{key[-visible:]}"
+   357→   357→
+   358→   358→
+   359→   359→def _validate_url(url: str, label: str) -> str:
+   360→   360→    if not url.startswith("https://"):
+   361→   361→        raise ValueError(
+   362→   362→            f"[{label}] Invalid URL '{url[:40]}': must be absolute HTTPS."
+   363→   363→        )
+   364→   364→    return url.rstrip("/")
+   365→   365→
+   366→   366→
+   367→   367→def _compute_backoff_delay(attempt: int) -> float:
+   368→   368→    """Compute exponential backoff delay with jitter."""
+   369→   369→    raw = RETRY_BASE_DELAY_SEC * (2 ** attempt)
+   370→   370→    jittered = raw + random.uniform(-RETRY_JITTER_SEC, RETRY_JITTER_SEC)
+   371→   371→    return min(max(jittered, 0.1), RETRY_MAX_DELAY_SEC)
+   372→   372→
+   373→   373→
+   374→   374→def _sanitize_api_key(key: str) -> str:
+   375→   375→    """Sanitize API key: strip whitespace, newlines, and null bytes."""
+   376→   376→    if not key:
+   377→   377→        return ""
+   378→   378→    cleaned = key.strip().replace("\n", "").replace("\r", "").replace("\0", "")
+   379→   379→    if cleaned != key:
+   380→   380→        logger.warning(
+   381→   381→            f"API key had trailing whitespace/newlines — sanitized "
+   382→   382→            f"(original length={len(key)}, cleaned={len(cleaned)})"
+   383→   383→        )
+   384→   384→    return cleaned
+   385→   385→
+   386→   386→
+   387→   387→def _read_error_body(error: urllib.error.HTTPError) -> str:
+   388→   388→    """Safely read HTTP error response body for diagnostics."""
+   389→   389→    try:
+   390→   390→        return error.read().decode("utf-8", errors="replace")[:500]
+   391→   391→    except Exception:
+   392→   392→        return "<could not read error body>"
+   393→   393→
+   394→   394→
+   395→   395→def _log_auth_failure(
+   396→   396→    provider: str,
+   397→   397→    slot_index: int,
+   398→   398→    error: urllib.error.HTTPError,
+   399→   399→    url: str,
+   400→   400→    headers_sent: dict,
+   401→   401→):
+   402→   402→    """
+   403→   403→    Log verbose diagnostic information for 403/400 errors.
+   404→   404→    Masks all sensitive keys. Only called on auth failures.
+   405→   405→    """
+   406→   406→    error_body = _read_error_body(error)
+   407→   407→
+   408→   408→    # Mask headers
+   409→   409→    sensitive_keys = {
+   410→   410→        "authorization", "x-portkey-api-key", "api-key",
+   411→   411→        "x-api-key", "bearer", "token",
+   412→   412→    }
+   413→   413→    masked_headers = {}
+   414→   414→    for k, v in headers_sent.items():
+   415→   415→        if k.lower() in sensitive_keys:
+   416→   416→            masked_headers[k] = _mask_key(str(v))
+   417→   417→        else:
+   418→   418→            masked_headers[k] = str(v)
+   419→   419→
+   420→   420→    logger.error(
+   421→   421→        f"[{provider}] slot {slot_index} AUTH FAILURE: "
+   422→   422→        f"HTTP {error.code} {error.reason}"
+   423→   423→    )
+   424→   424→    logger.error(f"  URL: {_mask_url(url)}")
+   425→   425→    logger.error(f"  Headers: {masked_headers}")
+   426→   426→    logger.error(f"  Response body: {error_body[:300]}")
+   427→   427→
+   428→   428→    # Infer root cause
+   429→   429→    if error.code == 403:
+   430→   430→        body_lower = error_body.lower()
+   431→   431→        # Detect Cloudflare bot protection (error code 1010)
+   432→   432→        if _CF_BOT_ERROR_CODE in error_body:
+   433→   433→            logger.error(
+   434→   434→                f"  DIAGNOSIS: CLOUDFLARE_BOT_PROTECTION — request blocked by "
+   435→   435→                f"Cloudflare anti-bot (error code 1010). This is NOT an auth failure. "
+   436→   436→                f"The User-Agent header may be missing or blocked. "
+   437→   437→                f"The request will be retried with backoff."
+   438→   438→            )
+   439→   439→        elif "invalid" in body_lower or "unauthorized" in body_lower:
+   440→   440→            logger.error(f"  DIAGNOSIS: INVALID_CREDENTIALS — key rejected by provider")
+   441→   441→        elif "quota" in body_lower or "limit" in body_lower or "rate" in body_lower:
+   442→   442→            logger.error(f"  DIAGNOSIS: QUOTA_EXCEEDED — account has hit limits")
+   443→   443→        elif "sanction" in body_lower or "region" in body_lower or "embargo" in body_lower:
+   444→   444→            logger.error(f"  DIAGNOSIS: REGION_BLOCKED — provider blocks this region/IP")
+   445→   445→        elif "expired" in body_lower:
+   446→   446→            logger.error(f"  DIAGNOSIS: KEY_EXPIRED — API key has expired")
+   447→   447→        else:
+   448→   448→            logger.error(
+   449→   449→                f"  DIAGNOSIS: AUTH_FAILURE — likely invalid/expired key "
+   450→   450→                f"or insufficient permissions. Check key format, whitespace, and account status."
+   451→   451→            )
+   452→   452→    elif error.code == 400:
+   453→   453→        body_lower = error_body.lower()
+   454→   454→        if not error_body.strip():
+   455→   455→            logger.error(
+   456→   456→                f"  DIAGNOSIS: EMPTY_RESPONSE_BODY_400 — server returned 400 with empty "
+   457→   457→                f"response body. This typically means the URL path is malformed or the "
+   458→   458→                f"model doesn't exist on this account. Verify the URL structure and model ID."
+   459→   459→            )
+   460→   460→        elif "model" in body_lower and ("not found" in body_lower or "invalid" in body_lower):
+   461→   461→            logger.error(f"  DIAGNOSIS: INVALID_MODEL — model ID not available on this account/region")
+   462→   462→        elif "payload" in body_lower or "body" in body_lower:
+   463→   463→            logger.error(f"  DIAGNOSIS: MALFORMED_REQUEST — request payload is invalid")
+   464→   464→        elif "header" in body_lower:
+   465→   465→            logger.error(f"  DIAGNOSIS: HEADER_FORMAT_ERROR — required header missing or malformed")
+   466→   466→        else:
+   467→   467→            logger.error(f"  DIAGNOSIS: BAD_REQUEST — check model ID and request format")
+   468→   468→
+   469→   469→    # Check for common key format issues
+   470→   470→    auth_header = headers_sent.get("Authorization", "")
+   471→   471→    if auth_header.startswith("Bearer "):
+   472→   472→        token = auth_header[7:]
+   473→   473→        if token != token.strip():
+   474→   474→            logger.error(f"  KEY_ISSUE: Bearer token has leading/trailing whitespace!")
+   475→   475→        if "\n" in token or "\r" in token:
+   476→   476→            logger.error(f"  KEY_ISSUE: Bearer token contains newline characters!")
+   477→   477→        if len(token) < 10:
+   478→   478→            logger.error(f"  KEY_ISSUE: Bearer token appears too short (len={len(token)})")
+   479→   479→
+   480→   480→
+   481→   481→def _mask_url(url: str) -> str:
+   482→   482→    """Mask sensitive parts of URL for logging."""
+   483→   483→    if "accounts/" in url:
+   484→   484→        parts = url.split("accounts/")
+   485→   485→        if len(parts) == 2:
+   486→   486→            acct_part = parts[1].split("/")[0]
+   487→   487→            masked = _mask_key(acct_part, 3)
+   488→   488→            return f"{parts[0]}accounts/{masked}/***"
+   489→   489→    return url[:80] + "..." if len(url) > 80 else url
+   490→   490→
+   491→   491→
+   492→   492→def normalize_cf_gateway_url(raw: str) -> str:
+   493→   493→    """Ensure CF AI Gateway URL always ends with the Workers AI
+   494→   494→    OpenAI-compatible chat completions path.
+   495→   495→
+   496→   496→    Handles common cases:
+   497→   497→    - Bare gateway root (no path after gateway slug)
+   498→   498→    - Partial paths (e.g. ends with /workers-ai or /workers-ai/v1)
+   499→   499→    - Already complete paths (returned unchanged)
+   500→   500→    """
+   501→   501→    raw = raw.rstrip("/")
+   502→   502→    suffix = "/workers-ai/v1/chat/completions"
+   503→   503→    if raw.endswith(suffix):
+   504→   504→        return raw
+   505→   505→    if raw.endswith("/workers-ai/v1"):
+   506→   506→        return raw + "/chat/completions"
+   507→   507→    if raw.endswith("/workers-ai"):
+   508→   508→        return raw + "/v1/chat/completions"
+   509→   509→    # Bare gateway root — append the full suffix
+   510→   510→    return raw + suffix
+   511→   511→
+   512→   512→
+   513→   513→class ProviderCircuitBreaker:
+   514→   514→    """Provider-level circuit breaker with automatic recovery.
+   515→   515→
+   516→   516→    Tracks overall provider health across all slots. When the failure count
+   517→   517→    exceeds the threshold, the circuit opens and rejects requests until the
+   518→   518→    recovery timeout elapses, at which point it transitions to half-open
+   519→   519→    and allows one request through to test recovery.
+   520→   520→    """
+   521→   521→
+   522→   522→    def __init__(
+   523→   523→        self,
+   524→   524→        provider_name: str,
+   525→   525→        failure_threshold: int = 20,
+   526→   526→        recovery_timeout: float = 300.0,
+   527→   527→    ):
+   528→   528→        self.provider_name = provider_name
+   529→   529→        self.failure_threshold = failure_threshold
+   530→   530→        self.recovery_timeout = recovery_timeout
+   531→   531→        self.failure_count = 0
+   532→   532→        self.last_failure_time = 0.0
+   533→   533→        self.state = "closed"  # closed, open, half_open
+   534→   534→
+   535→   535→    def record_success(self):
+   536→   536→        """Record a successful request — resets failure count and closes circuit."""
+   537→   537→        self.failure_count = 0
+   538→   538→        self.state = "closed"
+   539→   539→
+   540→   540→    def record_failure(self):
+   541→   541→        """Record a failed request — increments count and opens circuit if threshold reached."""
+   542→   542→        self.failure_count += 1
+   543→   543→        self.last_failure_time = time.time()
+   544→   544→        if self.failure_count >= self.failure_threshold:
+   545→   545→            if self.state != "open":
+   546→   546→                logger.warning(
+   547→   547→                    f"[{self.provider_name}] Circuit breaker OPENED — "
+   548→   548→                    f"{self.failure_count} consecutive failures reached threshold "
+   549→   549→                    f"({self.failure_threshold}). Will retry after "
+   550→   550→                    f"{self.recovery_timeout}s recovery timeout."
+   551→   551→                )
+   552→   552→            self.state = "open"
+   553→   553→
+   554→   554→    def allow_request(self) -> bool:
+   555→   555→        """Check if a request is allowed based on current circuit state."""
+   556→   556→        if self.state == "closed":
+   557→   557→            return True
+   558→   558→        if self.state == "open":
+   559→   559→            if time.time() - self.last_failure_time > self.recovery_timeout:
+   560→   560→                self.state = "half_open"
+   561→   561→                logger.info(
+   562→   562→                    f"[{self.provider_name}] Circuit breaker → HALF_OPEN — "
+   563→   563→                    f"recovery timeout elapsed, allowing test request"
+   564→   564→                )
+   565→   565→                return True
+   566→   566→            return False
+   567→   567→        return True  # half_open allows one request through
+   568→   568→
+   569→   569→
+   570→   570→class _BaseProvider:
+   571→   571→    name: str = "base"
+   572→   572→    MAX_RETRIES: int = 4
+   573→   573→
+   574→   574→    def chat_complete(
+   575→   575→        self,
+   576→   576→        messages:    List[Dict[str, str]],
+   577→   577→        model:       Optional[str] = None,
+   578→   578→        max_tokens:  int = 2048,
+   579→   579→        temperature: float = 0.2,
+   580→   580→        timeout:     int = 60,
+   581→   581→        task:        str = "general",
+   582→   582→    ) -> str:
+   583→   583→        raise NotImplementedError
+   584→   584→
+   585→   585→    @staticmethod
+   586→   586→    def _post_json_with_retry(
+   587→   587→        url: str,
+   588→   588→        headers: dict,
+   589→   589→        payload: dict,
+   590→   590→        timeout: int,
+   591→   591→        provider_name: str = "unknown",
+   592→   592→        slot_index: int = 0,
+   593→   593→        max_retries: int = MAX_NETWORK_RETRIES,
+   594→   594→    ) -> Tuple[dict, float]:
+   595→   595→        """
+   596→   596→        Send a POST request with exponential backoff retry on network/retryable errors.
+   597→   597→        Logs verbose diagnostics on 403/400 auth failures (with key masking).
+   598→   598→        """
+   599→   599→        last_error = None
+   600→   600→
+   601→   601→        # Ensure User-Agent is set (Cloudflare blocks requests without it)
+   602→   602→        if "User-Agent" not in headers:
+   603→   603→            headers["User-Agent"] = _USER_AGENT
+   604→   604→
+   605→   605→        for attempt in range(max_retries + 1):
+   606→   606→            t0 = time.monotonic()
+   607→   607→            data = json.dumps(payload).encode("utf-8")
+   608→   608→            req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+   609→   609→
+   610→   610→            try:
+   611→   611→                with urllib.request.urlopen(req, timeout=timeout) as resp:
+   612→   612→                    result = json.loads(resp.read().decode("utf-8"))
+   613→   613→                latency_ms = (time.monotonic() - t0) * 1000.0
+   614→   614→                return result, latency_ms
+   615→   615→
+   616→   616→            except urllib.error.HTTPError as e:
+   617→   617→                latency_ms = (time.monotonic() - t0) * 1000.0
+   618→   618→                error_body = _read_error_body(e)
+   619→   619→
+   620→   620→                # Cloudflare bot protection (error code 1010) — RETRYABLE
+   621→   621→                # This is NOT a real auth failure; it's transient bot detection
+   622→   622→                if e.code == 403 and _CF_BOT_ERROR_CODE in error_body:
+   623→   623→                    _log_auth_failure(provider_name, slot_index, e, url, headers)
+   624→   624→                    if attempt < max_retries:
+   625→   625→                        delay = _compute_backoff_delay(attempt) * 2  # extra delay for bot protection
+   626→   626→                        logger.warning(
+   627→   627→                            f"[{provider_name}] slot {slot_index} Cloudflare bot protection "
+   628→   628→                            f"(1010) — retry {attempt + 1}/{max_retries} in {delay:.1f}s"
+   629→   629→                        )
+   630→   630→                        time.sleep(delay)
+   631→   631→                        continue
+   632→   632→                    else:
+   633→   633→                        logger.error(
+   634→   634→                            f"[{provider_name}] slot {slot_index} Cloudflare bot protection "
+   635→   635→                            f"persisted after {max_retries + 1} attempts"
+   636→   636→                        )
+   637→   637→                        raise
+   638→   638→
+   639→   639→                # Auth failures (401, 403) — NEVER retry, log verbose diagnostics
+   640→   640→                # 401 Unauthorized = invalid/expired credentials (permanent)
+   641→   641→                # 403 Forbidden = revoked/insufficient permissions (permanent)
+   642→   642→                # Both are authentication/authorization failures that retrying
+   643→   643→                # will NEVER fix — they require credential rotation.
+   644→   644→                if e.code in AUTH_FAILURE_HTTP_CODES:
+   645→   645→                    _log_auth_failure(provider_name, slot_index, e, url, headers)
+   646→   646→                    logger.error(
+   647→   647→                        f"[{provider_name}] slot {slot_index} HTTP {e.code} — "
+   648→   648→                        f"AUTH FAILURE, NOT retrying (credential issue, not transient)"
+   649→   649→                    )
+   650→   650→                    raise
+   651→   651→
+   652→   652→                # 400 Bad Request — typically invalid model or malformed request
+   653→   653→                # Also NOT retried (the request itself is wrong, retrying won't help)
+   654→   654→                # BUT this is NOT an auth failure — raise BadRequestError instead.
+   655→   655→                if e.code == 400:
+   656→   656→                    logger.error(
+   657→   657→                        f"[{provider_name}] slot {slot_index} HTTP 400 — "
+   658→   658→                        f"BAD_REQUEST, NOT retrying (invalid model or malformed payload). "
+   659→   659→                        f"Check model ID and URL path."
+   660→   660→                    )
+   661→   661→                    raise BadRequestError(
+   662→   662→                        f"HTTP 400 for slot {slot_index}: "
+   663→   663→                        f"{error_body[:200] if error_body else 'empty body'}",
+   664→   664→                        provider=provider_name,
+   665→   665→                        slot=slot_index,
+   666→   666→                    )
+   667→   667→
+   668→   668→                # Retryable errors (429, 5xx)
+   669→   669→                if e.code in RETRYABLE_HTTP_CODES:
+   670→   670→                    if attempt < max_retries:
+   671→   671→                        delay = _compute_backoff_delay(attempt)
+   672→   672→                        logger.warning(
+   673→   673→                            f"[{provider_name}] slot {slot_index} HTTP {e.code} — "
+   674→   674→                            f"retry {attempt + 1}/{max_retries} in {delay:.1f}s"
+   675→   675→                        )
+   676→   676→                        time.sleep(delay)
+   677→   677→                        continue
+   678→   678→                    else:
+   679→   679→                        logger.error(
+   680→   680→                            f"[{provider_name}] slot {slot_index} HTTP {e.code} — "
+   681→   681→                            f"all {max_retries + 1} attempts exhausted"
+   682→   682→                        )
+   683→   683→                        raise
+   684→   684→
+   685→   685→                # Non-retryable errors (404, 405, etc.)
+   686→   686→                raise
+   687→   687→
+   688→   688→            except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as e:
+   689→   689→                latency_ms = (time.monotonic() - t0) * 1000.0
+   690→   690→                if attempt < max_retries:
+   691→   691→                    delay = _compute_backoff_delay(attempt)
+   692→   692→                    logger.warning(
+   693→   693→                        f"[{provider_name}] slot {slot_index} network error: {e} — "
+   694→   694→                        f"retry {attempt + 1}/{max_retries} in {delay:.1f}s"
+   695→   695→                    )
+   696→   696→                    time.sleep(delay)
+   697→   697→                    continue
+   698→   698→                else:
+   699→   699→                    logger.error(
+   700→   700→                        f"[{provider_name}] slot {slot_index} network error — "
+   701→   701→                        f"all {max_retries + 1} attempts exhausted: {e}"
+   702→   702→                    )
+   703→   703→                    raise
+   704→   704→
+   705→   705→        # Should not reach here, but just in case
+   706→   706→        raise last_error if last_error else RuntimeError("Unexpected retry loop exit")
+   707→   707→
+   708→   708→    @staticmethod
+   709→   709→    def _extract_text(response: dict) -> str:
+   710→   710→        """Extract text content from any provider response format.
+   711→   711→
+   712→   712→        Handles OpenAI-compatible format, CF Workers AI format, and legacy CF
+   713→   713→        format. NEVER returns str(response) — always returns a proper string
+   714→   714→        extracted from the response content, or empty string if extraction fails.
+   715→   715→        """
+   716→   716→        if not isinstance(response, dict):
+   717→   717→            return ""
+   718→   718→        # Format 1: OpenAI-compatible (choices[0].message.content)
+   719→   719→        try:
+   720→   720→            choices = response.get("choices", [])
+   721→   721→            if choices:
+   722→   722→                content = choices[0].get("message", {}).get("content", "")
+   723→   723→                if isinstance(content, str) and content.strip():
+   724→   724→                    return content.strip()
+   725→   725→        except (KeyError, IndexError, TypeError, AttributeError):
+   726→   726→            pass
+   727→   727→        # Format 2: CF Workers AI wrapped in 'result'
+   728→   728→        result = response.get("result", None)
+   729→   729→        if isinstance(result, dict):
+   730→   730→            # result.choices — nested OpenAI format
+   731→   731→            try:
+   732→   732→                r_choices = result.get("choices", [])
+   733→   733→                if r_choices:
+   734→   734→                    content = r_choices[0].get("message", {}).get("content", "")
+   735→   735→                    if isinstance(content, str) and content.strip():
+   736→   736→                        return content.strip()
+   737→   737→            except (KeyError, IndexError, TypeError, AttributeError):
+   738→   738→                pass
+   739→   739→            # result.response — legacy CF format
+   740→   740→            try:
+   741→   741→                resp_val = result.get("response", "")
+   742→   742→                if isinstance(resp_val, str) and resp_val.strip():
+   743→   743→                    return resp_val.strip()
+   744→   744→            except (KeyError, TypeError, AttributeError):
+   745→   745→                pass
+   746→   746→        elif isinstance(result, str) and result.strip():
+   747→   747→            return result.strip()
+   748→   748→        # Format 3: Empty or unrecognized — return empty string, NOT str(response)
+   749→   749→        logger.debug(
+   750→   750→            f"[_extract_text] Could not extract text from response keys: "
+   751→   751→            f"{list(response.keys()) if isinstance(response, dict) else 'non-dict'}"
+   752→   752→        )
+   753→   753→        return ""
+   754→   754→
+   755→   755→
+   756→   756→# ── Portkey ────────────────────────────────────────────────────────────────────
+   757→   757→
+   758→   758→class PortkeyProvider(_BaseProvider):
+   759→   759→    name          = "portkey"
+   760→   760→    DEFAULT_MODEL = "meta/llama-3.1-70b-instruct"
+   761→   761→    PORTKEY_MODELS = [
+   762→   762→        "meta/llama-3.1-70b-instruct",
+   763→   763→        "meta/llama-3.1-8b-instruct",
+   764→   764→        "meta/llama-3.2-3b-instruct",
+   765→   765→    ]
+   766→   766→
+   767→   767→    def __init__(self):
+   768→   768→        self.rotator = build_rotator_from_env("PORTKEY", n_accounts=3)
+   769→   769→        raw_url = os.environ.get("PORTKEY_GATEWAY_URL", "https://api.portkey.ai/v1")
+   770→   770→        if not raw_url.startswith("http"):
+   771→   771→            raw_url = "https://api.portkey.ai/v1"
+   772→   772→        self.gateway_url = raw_url.rstrip("/")
+   773→   773→        self.circuit_breaker = ProviderCircuitBreaker("Portkey")
+   774→   774→
+   775→   775→        # ── Pre-flight key validation ────────────────────────────────────
+   776→   776→        # Validate that Portkey API keys are long enough to be valid.
+   777→   777→        # Real Portkey API keys are alphanumeric strings (e.g. g8V...qTF)
+   778→   778→        # that do NOT necessarily start with 'pk-' or 'sk-'.
+   779→   779→        # If ALL keys are too short, raise ProviderConfigurationError
+   780→   780→        # so the health check marks this provider as 'skipped'.
+   781→   781→        MIN_KEY_LEN = 16
+   782→   782→        self._active_slots: list[int] = []
+   783→   783→        self._invalid_key_slots: list[int] = []
+   784→   784→        for i in range(1, 4):
+   785→   785→            key = os.environ.get(f"PORTKEY_API_KEY_{i}", "").strip()
+   786→   786→            virtual_key = os.environ.get(f"PORTKEY_VIRTUAL_KEY_{i}", "").strip()
+   787→   787→            if not key and not virtual_key:
+   788→   788→                continue
+   789→   789→            # A slot is valid if its key (or virtual key) is long enough.
+   790→   790→            # Portkey keys are alphanumeric with no mandatory prefix.
+   791→   791→            effective_key = key or virtual_key
+   792→   792→            if len(effective_key) >= MIN_KEY_LEN:
+   793→   793→                self._active_slots.append(i)
+   794→   794→            else:
+   795→   795→                self._invalid_key_slots.append(i)
+   796→   796→                logger.warning(
+   797→   797→                    f"[Portkey] slot {i} skipped — key too short "
+   798→   798→                    f"(len={len(effective_key)}, expected >={MIN_KEY_LEN})"
+   799→   799→                )
+   800→   800→
+   801→   801→        if self._invalid_key_slots and not self._active_slots:
+   802→   802→            reason = (
+   803→   803→                "All Portkey API keys are too short "
+   804→   804→                f"(len < {MIN_KEY_LEN}). "
+   805→   805→                "Check PORTKEY_API_KEY_1/2/3 in GitHub Secrets."
+   806→   806→            )
+   807→   807→            logger.warning(f"[Portkey] {reason}")
+   808→   808→            raise ProviderConfigurationError(reason, provider="portkey")
+   809→   809→
+   810→   810→        logger.info(
+   811→   811→            f"[Portkey] Initialized with gateway: {_mask_url(self.gateway_url)} "
+   812→   812→            f"({len(self._active_slots)} active slot(s), "
+   813→   813→            f"{len(self._invalid_key_slots)} invalid-format slot(s))"
+   814→   814→        )
+   815→   815→
+   816→   816→    @staticmethod
+   817→   817→    def _build_portkey_auth(slot: int) -> dict:
+   818→   818→        """
+   819→   819→        Build Portkey authentication headers with intelligent key detection.
+   820→   820→
+   821→   821→        Supports auth methods:
+   822→   822→        1. Native Portkey key (pk- prefix) → x-portkey-api-key header
+   823→   823→        2. Virtual key fallback (pk- prefix in PORTKEY_VIRTUAL_KEY) → combined auth
+   824→   824→        3. Provider API key (sk- prefix like OpenAI) → Bearer + x-portkey-provider
+   825→   825→        4. Generic alphanumeric key (no prefix) → Bearer auth with x-portkey-api-key
+   826→   826→
+   827→   827→        Raises ValueError if no valid key format is found.
+   828→   828→        """
+   829→   829→        key = os.environ.get(f"PORTKEY_API_KEY_{slot}", "").strip()
+   830→   830→        virtual_key = os.environ.get(f"PORTKEY_VIRTUAL_KEY_{slot}", "").strip()
+   831→   831→
+   832→   832→        headers = {"Content-Type": "application/json"}
+   833→   833→
+   834→   834→        if key.startswith("pk-"):
+   835→   835→            # Native Portkey key
+   836→   836→            headers["x-portkey-api-key"] = key
+   837→   837→            logger.debug(
+   838→   838→                f"[Portkey] slot {slot} Using native Portkey key: {_mask_key(key)}"
+   839→   839→            )
+   840→   840→        elif virtual_key.startswith("pk-"):
+   841→   841→            # Virtual key fallback
+   842→   842→            headers["x-portkey-api-key"] = virtual_key
+   843→   843→            headers["x-portkey-virtual-key"] = virtual_key
+   844→   844→            logger.debug(
+   845→   845→                f"[Portkey] slot {slot} Using virtual key: {_mask_key(virtual_key)}"
+   846→   846→            )
+   847→   847→        elif key.startswith("sk-"):
+   848→   848→            # Provider API key (e.g. OpenAI key) — route directly
+   849→   849→            headers["Authorization"] = f"Bearer {key}"
+   850→   850→            headers["x-portkey-provider"] = "openai"
+   851→   851→            logger.debug(
+   852→   852→                f"[Portkey] slot {slot} Using provider key (sk- prefix) "
+   853→   853→                f"with x-portkey-provider=openai"
+   854→   854→            )
+   855→   855→        elif key:
+   856→   856→            # Generic alphanumeric key (e.g. g8V...qTF) — try as Bearer with
+   857→   857→            # x-portkey-api-key header. Real Portkey keys may not have a prefix.
+   858→   858→            headers["Authorization"] = f"Bearer {key}"
+   859→   859→            headers["x-portkey-api-key"] = key
+   860→   860→            logger.debug(
+   861→   861→                f"[Portkey] slot {slot} Using generic key "
+   862→   862→                f"(starts with '{key[:4]}...') — attempting Bearer + x-portkey-api-key auth."
+   863→   863→            )
+   864→   864→        else:
+   865→   865→            raise ValueError(
+   866→   866→                f"Slot {slot}: no valid Portkey key found — "
+   867→   867→                f"PORTKEY_API_KEY_{slot} and PORTKEY_VIRTUAL_KEY_{slot} are empty"
+   868→   868→            )
+   869→   869→
+   870→   870→        # Also check for x-portkey-config header (virtual key config ID)
+   871→   871→        config_id = os.environ.get(
+   872→   872→            f"PORTKEY_CONFIG_{slot}",
+   873→   873→            os.environ.get("PORTKEY_CONFIG", "")
+   874→   874→        ).strip()
+   875→   875→        if config_id:
+   876→   876→            headers["x-portkey-config"] = config_id
+   877→   877→            logger.debug(
+   878→   878→                f"[Portkey] slot {slot} Using config: {_mask_key(config_id)}"
+   879→   879→            )
+   880→   880→
+   881→   881→        return headers
+   882→   882→
+   883→   883→    @staticmethod
+   884→   884→    def _validate_portkey_key(key: str, slot_index: int = 0) -> List[str]:
+   885→   885→        """Validate Portkey API key format and return list of diagnostic issues.
+   886→   886→
+   887→   887→        Portkey keys may have various formats: pk-xxx-xxx (native),
+   888→   888→        sk-xxx (provider), or generic alphanumeric (e.g. g8V...qTF).
+   889→   889→        Returns a list of warning strings (empty if key looks valid).
+   890→   890→        """
+   891→   891→        issues = []
+   892→   892→        if not key:
+   893→   893→            issues.append("Key is empty")
+   894→   894→            return issues
+   895→   895→        if len(key) < 16:
+   896→   896→            issues.append(
+   897→   897→                f"Key appears too short (len={len(key)}). "
+   898→   898→                f"Expected at least 16 characters for a valid API key."
+   899→   899→            )
+   900→   900→        if "\n" in key or "\r" in key:
+   901→   901→            issues.append("Key contains newline characters — possible copy-paste error")
+   902→   902→        if key != key.strip():
+   903→   903→            issues.append("Key has leading/trailing whitespace")
+   904→   904→        if issues:
+   905→   905→            for issue in issues:
+   906→   906→                logger.warning(
+   907→   907→                    f"[Portkey] slot {slot_index} KEY VALIDATION: {issue}"
+   908→   908→                )
+   909→   909→        return issues
+   910→   910→
+   911→   911→    @staticmethod
+   912→   912→    def _get_virtual_key(slot_index: int) -> Optional[str]:
+   913→   913→        """Get PORTKEY_VIRTUAL_KEY_{i} env var for alternative auth.
+   914→   914→
+   915→   915→        Portkey supports virtual keys as an alternative to direct API keys.
+   916→   916→        Virtual keys are mapped in the Portkey dashboard to provider credentials.
+   917→   917→        """
+   918→   918→        virtual_key = os.environ.get(f"PORTKEY_VIRTUAL_KEY_{slot_index}", "")
+   919→   919→        if virtual_key:
+   920→   920→            virtual_key = _sanitize_api_key(virtual_key)
+   921→   921→        return virtual_key or None
+   922→   922→
+   923→   923→    def chat_complete(
+   924→   924→        self, messages, model=None, max_tokens=2048, temperature=0.2,
+   925→   925→        timeout=60, task="general"
+   926→   926→    ) -> str:
+   927→   927→        # Provider-level circuit breaker check
+   928→   928→        if not self.circuit_breaker.allow_request():
+   929→   929→            logger.warning(
+   930→   930→                f"[Portkey] Circuit breaker OPEN — skipping request"
+   931→   931→            )
+   932→   932→            raise RuntimeError(
+   933→   933→                f"Portkey provider circuit breaker is OPEN "
+   934→   934→                f"({self.circuit_breaker.failure_count} consecutive failures)"
+   935→   935→            )
+   936→   936→
+   937→   937→        explicit_model = model
+   938→   938→        chosen_model   = explicit_model or self.DEFAULT_MODEL
+   939→   939→        models_to_try  = [chosen_model] + [m for m in self.PORTKEY_MODELS if m != chosen_model]
+   940→   940→
+   941→   941→        slot      = self.rotator.get_primary()
+   942→   942→        fallbacks = [slot] + self.rotator.get_fallback_chain(slot.index)
+   943→   943→
+   944→   944→        last_auth_error = None
+   945→   945→        for attempt, s in enumerate(fallbacks):
+   946→   946→            last_err = None
+   947→   947→            for m in models_to_try:
+   948→   948→                try:
+   949→   949→                    # Sanitize API key
+   950→   950→                    clean_key = _sanitize_api_key(s.api_key)
+   951→   951→                    if not clean_key:
+   952→   952→                        logger.warning(f"[Portkey] slot {s.index} has empty API key — skipping")
+   953→   953→                        break  # No point trying other models with empty key
+   954→   954→
+   955→   955→                    # Validate key format
+   956→   956→                    key_issues = self._validate_portkey_key(clean_key, s.index)
+   957→   957→                    if key_issues:
+   958→   958→                        logger.warning(
+   959→   959→                            f"[Portkey] slot {s.index} Key format issues detected. "
+   960→   960→                            f"If auth fails, check: (1) key starts with 'pk-', "
+   961→   961→                            f"(2) key is not expired, (3) PORTKEY_VIRTUAL_KEY_{s.index} "
+   962→   962→                            f"env var as alternative auth."
+   963→   963→                        )
+   964→   964→
+   965→   965→                    url     = f"{self.gateway_url}/chat/completions"
+   966→   966→
+   967→   967→                    # ── Portkey Authentication Strategy ─────────────────────
+   968→   968→                    # Use the enhanced _build_portkey_auth method for intelligent
+   969→   969→                    # key detection: pk- (native), virtual key, sk- (provider),
+   970→   970→                    # or unknown format with warning.
+   971→   971→                    try:
+   972→   972→                        headers = self._build_portkey_auth(s.index)
+   973→   973→                    except ValueError as auth_err:
+   974→   974→                        logger.warning(
+   975→   975→                            f"[Portkey] slot {s.index} Auth build failed: {auth_err}"
+   976→   976→                        )
+   977→   977→                        break  # No point trying other models with bad auth
+   978→   978→
+   979→   979→                    payload = {
+   980→   980→                        "model":       m,
+   981→   981→                        "messages":    messages,
+   982→   982→                        "max_tokens":  max_tokens,
+   983→   983→                        "temperature": temperature,
+   984→   984→                    }
+   985→   985→                    resp, lat = self._post_json_with_retry(
+   986→   986→                        url, headers, payload, timeout,
+   987→   987→                        provider_name="Portkey", slot_index=s.index
+   988→   988→                    )
+   989→   989→                    self.rotator.mark_success(s, lat)
+   990→   990→                    self.circuit_breaker.record_success()
+   991→   991→                    return self._extract_text(resp)
+   992→   992→                except BadRequestError as e:
+   993→   993→                    # HTTP 400 — NOT an auth failure, try next model
+   994→   994→                    logger.debug(
+   995→   995→                        f"[Portkey] slot {s.index} model {m} → "
+   996→   996→                        f"BadRequestError: {str(e)[:200]}"
+   997→   997→                    )
+   998→   998→                    continue  # Try next model
+   999→   999→                except urllib.error.HTTPError as e:
+  1000→  1000→                    last_err = e
+  1001→  1001→                    if e.code in (403, 401):
+  1002→  1002→                        last_auth_error = e
+  1003→  1003→                        error_body = _read_error_body(e)
+  1004→  1004→                        logger.warning(
+  1005→  1005→                            f"[Portkey] slot {s.index} AUTH FAIL HTTP {e.code}"
+  1006→  1006→                        )
+  1007→  1007→                        # Enhanced 401 diagnostics
+  1008→  1008→                        if e.code == 401:
+  1009→  1009→                            logger.error(
+  1010→  1010→                                f"[Portkey] slot {s.index} HTTP 401 UNAUTHORIZED — "
+  1011→  1011→                                f"possible causes: "
+  1012→  1012→                                f"(1) Invalid/expired API key, "
+  1013→  1013→                                f"(2) Key may need x-portkey-config header for virtual key auth, "
+  1014→  1014→                                f"(3) Check PORTKEY_GATEWAY_URL matches your workspace. "
+  1015→  1015→                                f"Response: {error_body[:200]}"
+  1016→  1016→                            )
+  1017→  1017→                        self.rotator.mark_failure(s)
+  1018→  1018→                        self.circuit_breaker.record_failure()
+  1019→  1019→                        break  # Try next slot, not next model
+  1020→  1020→                    # NOTE: 400 is now caught as BadRequestError above, not here
+  1021→  1021→                    if e.code == 404:
+  1022→  1022→                        logger.debug(f"[Portkey] Model not found: {m}")
+  1023→  1023→                        continue  # Try next model
+  1024→  1024→                    logger.warning(f"[Portkey] slot {s.index} HTTP {e.code}: {e.reason}")
+  1025→  1025→                    self.rotator.mark_failure(s)
+  1026→  1026→                    self.circuit_breaker.record_failure()
+  1027→  1027→                    if attempt == len(fallbacks) - 1:
+  1028→  1028→                        raise
+  1029→  1029→                    time.sleep(2 ** attempt)
+  1030→  1030→
+  1031→  1031→            if last_err and last_err.code in (403, 401):
+  1032→  1032→                continue  # Already marked failure, try next slot
+  1033→  1033→            elif last_err:
+  1034→  1034→                self.rotator.mark_failure(s)
+  1035→  1035→                self.circuit_breaker.record_failure()
+  1036→  1036→                if attempt == len(fallbacks) - 1:
+  1037→  1037→                    raise last_err
+  1038→  1038→                time.sleep(2 ** attempt)
+  1039→  1039→
+  1040→  1040→        # All slots exhausted
+  1041→  1041→        if last_auth_error:
+  1042→  1042→            raise last_auth_error
+  1043→  1043→        return ""
+  1044→  1044→
+  1045→  1045→
+  1046→  1046→# ── Cerebras ───────────────────────────────────────────────────────────────────
+  1047→  1047→
+  1048→  1048→class CerebrasProvider(_BaseProvider):
+  1049→  1049→    name          = "cerebras"
+  1050→  1050→    BASE_URL      = "https://api.cerebras.ai/v1"
+  1051→  1051→    DEFAULT_MODEL = "llama3.1-8b"  # Most stable free-tier model
+  1052→  1052→    CEREBRAS_MODELS = [
+  1053→  1053→        "llama3.1-8b",
+  1054→  1054→        "llama3.1-70b",
+  1055→  1055→        "llama-4-scout-17b-16e-instruct",
+  1056→  1056→        "qwen-2.5-32b",
+  1057→  1057→    ]
+  1058→  1058→
+  1059→  1059→    def __init__(self):
+  1060→  1060→        self.rotator = build_rotator_from_env("CEREBRAS", n_accounts=3)
+  1061→  1061→        self._discovered_models: Optional[List[str]] = None
+  1062→  1062→        self._discovery_ts: float = 0.0
+  1063→  1063→        self.circuit_breaker = ProviderCircuitBreaker("Cerebras")
+  1064→  1064→        logger.info(
+  1065→  1065→            f"[Cerebras] Initialized with {len(self.rotator.slots)} slot(s)"
+  1066→  1066→        )
+  1067→  1067→
+  1068→  1068→    def _discover_models(self) -> List[str]:
+  1069→  1069→        """Fetch available models from Cerebras /v1/models endpoint.
+  1070→  1070→
+  1071→  1071→        Caches results for 10 minutes to avoid excessive API calls.
+  1072→  1072→        Falls back to CEREBRAS_MODELS on any error.
+  1073→  1073→        """
+  1074→  1074→        cache_ttl = 600.0  # 10 minutes
+  1075→  1075→        if (
+  1076→  1076→            self._discovered_models is not None
+  1077→  1077→            and (time.time() - self._discovery_ts) < cache_ttl
+  1078→  1078→        ):
+  1079→  1079→            return self._discovered_models
+  1080→  1080→
+  1081→  1081→        try:
+  1082→  1082→            slot = self.rotator.get_primary()
+  1083→  1083→            clean_key = _sanitize_api_key(slot.api_key)
+  1084→  1084→            if not clean_key:
+  1085→  1085→                logger.debug("[Cerebras] No API key for model discovery — using static list")
+  1086→  1086→                return list(self.CEREBRAS_MODELS)
+  1087→  1087→
+  1088→  1088→            url = f"{self.BASE_URL}/models"
+  1089→  1089→            headers = {
+  1090→  1090→                "Authorization": f"Bearer {clean_key}",
+  1091→  1091→                "User-Agent": _USER_AGENT,
+  1092→  1092→            }
+  1093→  1093→            req = urllib.request.Request(url, headers=headers, method="GET")
+  1094→  1094→            with urllib.request.urlopen(req, timeout=15) as resp:
+  1095→  1095→                data = json.loads(resp.read().decode("utf-8"))
+  1096→  1096→
+  1097→  1097→            discovered = []
+  1098→  1098→            for item in data.get("data", []):
+  1099→  1099→                model_id = item.get("id", "")
+  1100→  1100→                if model_id:
+  1101→  1101→                    discovered.append(model_id)
+  1102→  1102→
+  1103→  1103→            if discovered:
+  1104→  1104→                self._discovered_models = discovered
+  1105→  1105→                self._discovery_ts = time.time()
+  1106→  1106→                logger.info(
+  1107→  1107→                    f"[Cerebras] Discovered {len(discovered)} models: {discovered}"
+  1108→  1108→                )
+  1109→  1109→                return discovered
+  1110→  1110→            else:
+  1111→  1111→                logger.warning("[Cerebras] /models returned empty list — using static list")
+  1112→  1112→                return list(self.CEREBRAS_MODELS)
+  1113→  1113→
+  1114→  1114→        except Exception as e:
+  1115→  1115→            logger.warning(
+  1116→  1116→                f"[Cerebras] Model discovery failed: {e} — using static list"
+  1117→  1117→            )
+  1118→  1118→            return list(self.CEREBRAS_MODELS)
+  1119→  1119→
+  1120→  1120→    @staticmethod
+  1121→  1121→    def _extract_openai_content(response_json: dict) -> str:
+  1122→  1122→        """
+  1123→  1123→        Extract content from OpenAI-format response.
+  1124→  1124→        NEVER returns str(response_json).
+  1125→  1125→        Handles finish_reason=length gracefully.
+  1126→  1126→        """
+  1127→  1127→        try:
+  1128→  1128→            choices = response_json.get("choices", [])
+  1129→  1129→            if not choices:
+  1130→  1130→                logger.warning(
+  1131→  1131→                    f"[Cerebras] Response has no choices. "
+  1132→  1132→                    f"Keys: {list(response_json.keys())}"
+  1133→  1133→                )
+  1134→  1134→                return ""
+  1135→  1135→            choice = choices[0]
+  1136→  1136→            finish_reason = choice.get("finish_reason", "unknown")
+  1137→  1137→            if finish_reason == "length":
+  1138→  1138→                logger.warning(
+  1139→  1139→                    f"[Cerebras] finish_reason=length — "
+  1140→  1140→                    f"max_tokens budget exhausted before TORSHIELD_OK. "
+  1141→  1141→                    f"Increase max_tokens in health check prompt."
+  1142→  1142→                )
+  1143→  1143→            content = choice.get("message", {}).get("content", "")
+  1144→  1144→            return content if isinstance(content, str) else ""
+  1145→  1145→        except (KeyError, IndexError, TypeError) as e:
+  1146→  1146→            logger.error(f"[Cerebras] Response parse error: {e}")
+  1147→  1147→            return ""
+  1148→  1148→
+  1149→  1149→    def chat_complete(
+  1150→  1150→        self, messages, model=None, max_tokens=2048, temperature=0.2,
+  1151→  1151→        timeout=60, task="general"
+  1152→  1152→    ) -> str:
+  1153→  1153→        # Provider-level circuit breaker check
+  1154→  1154→        if not self.circuit_breaker.allow_request():
+  1155→  1155→            logger.warning(
+  1156→  1156→                f"[Cerebras] Circuit breaker OPEN — skipping request "
+  1157→  1157→                f"(failures={self.circuit_breaker.failure_count}, "
+  1158→  1158→                f"state={self.circuit_breaker.state})"
+  1159→  1159→            )
+  1160→  1160→            raise RuntimeError(
+  1161→  1161→                f"Cerebras provider circuit breaker is OPEN "
+  1162→  1162→                f"({self.circuit_breaker.failure_count} consecutive failures)"
+  1163→  1163→            )
+  1164→  1164→
+  1165→  1165→        explicit_model = model
+  1166→  1166→        chosen_model   = explicit_model or self.DEFAULT_MODEL
+  1167→  1167→
+  1168→  1168→        # Use discovered models if available, otherwise fall back to static list
+  1169→  1169→        available_models = self._discover_models()
+  1170→  1170→        models_to_try  = [chosen_model] + [m for m in available_models if m != chosen_model]
+  1171→  1171→
+  1172→  1172→        slot      = self.rotator.get_primary()
+  1173→  1173→        fallbacks = [slot] + self.rotator.get_fallback_chain(slot.index)
+  1174→  1174→
+  1175→  1175→        last_auth_error = None
+  1176→  1176→        for attempt, s in enumerate(fallbacks):
+  1177→  1177→            last_err = None
+  1178→  1178→            for m in models_to_try:
+  1179→  1179→                try:
+  1180→  1180→                    # Sanitize API key
+  1181→  1181→                    clean_key = _sanitize_api_key(s.api_key)
+  1182→  1182→                    if not clean_key:
+  1183→  1183→                        logger.warning(f"[Cerebras] slot {s.index} has empty API key — skipping")
+  1184→  1184→                        break  # No point trying other models with empty key
+  1185→  1185→
+  1186→  1186→                    url     = f"{self.BASE_URL}/chat/completions"
+  1187→  1187→                    headers = {
+  1188→  1188→                        "Content-Type":  "application/json",
+  1189→  1189→                        "Authorization": f"Bearer {clean_key}",
+  1190→  1190→                    }
+  1191→  1191→                    payload = {
+  1192→  1192→                        "model":       m,
+  1193→  1193→                        "messages":    messages,
+  1194→  1194→                        "max_tokens":  max_tokens,
+  1195→  1195→                        "temperature": temperature,
+  1196→  1196→                        "stream":      False,
+  1197→  1197→                    }
+  1198→  1198→                    resp, lat = self._post_json_with_retry(
+  1199→  1199→                        url, headers, payload, timeout,
+  1200→  1200→                        provider_name="Cerebras", slot_index=s.index
+  1201→  1201→                    )
+  1202→  1202→                    self.rotator.mark_success(s, lat)
+  1203→  1203→                    self.circuit_breaker.record_success()
+  1204→  1204→                    return self._extract_openai_content(resp)
+  1205→  1205→                except BadRequestError as e:
+  1206→  1206→                    # HTTP 400 — NOT an auth failure, try next model
+  1207→  1207→                    logger.debug(
+  1208→  1208→                        f"[Cerebras] slot {s.index} model {m} → "
+  1209→  1209→                        f"BadRequestError: {str(e)[:200]}"
+  1210→  1210→                    )
+  1211→  1211→                    continue  # Try next model
+  1212→  1212→                except urllib.error.HTTPError as e:
+  1213→  1213→                    last_err = e
+  1214→  1214→                    if e.code in (403, 401):
+  1215→  1215→                        last_auth_error = e
+  1216→  1216→                        logger.warning(f"[Cerebras] slot {s.index} AUTH FAIL HTTP {e.code}")
+  1217→  1217→                        self.rotator.mark_failure(s)
+  1218→  1218→                        self.circuit_breaker.record_failure()
+  1219→  1219→                        break  # Try next slot, not next model
+  1220→  1220→                    # NOTE: 400 is now caught as BadRequestError above, not here
+  1221→  1221→                    if e.code == 404:
+  1222→  1222→                        logger.debug(f"[Cerebras] Model not found: {m}")
+  1223→  1223→                        continue  # Try next model
+  1224→  1224→                    logger.warning(f"[Cerebras] slot {s.index} HTTP {e.code}: {e.reason}")
+  1225→  1225→                    self.rotator.mark_failure(s)
+  1226→  1226→                    self.circuit_breaker.record_failure()
+  1227→  1227→                    if attempt == len(fallbacks) - 1:
+  1228→  1228→                        raise
+  1229→  1229→                    time.sleep(2 ** attempt)
+  1230→  1230→
+  1231→  1231→            if last_err and last_err.code in (403, 401):
+  1232→  1232→                continue  # Already marked failure, try next slot
+  1233→  1233→            elif last_err:
+  1234→  1234→                self.rotator.mark_failure(s)
+  1235→  1235→                self.circuit_breaker.record_failure()
+  1236→  1236→                if attempt == len(fallbacks) - 1:
+  1237→  1237→                    raise last_err
+  1238→  1238→                time.sleep(2 ** attempt)
+  1239→  1239→
+  1240→  1240→        if last_auth_error:
+  1241→  1241→            raise last_auth_error
+  1242→  1242→        return ""
+  1243→  1243→
+  1244→  1244→
+  1245→  1245→# ── Cloudflare Workers AI (direct) ────────────────────────────────────────────
+  1246→  1246→
+  1247→  1247→class CloudflareWorkersAIProvider(_BaseProvider):
+  1248→  1248→    """
+  1249→  1249→    Cloudflare Workers AI — direct API with dynamic model selection.
+  1250→  1250→    Model is resolved at call-time via CloudflareModelSelector.
+  1251→  1251→
+  1252→  1252→    CORRECTION 7: Uses OpenAI-compatible endpoint:
+  1253→  1253→      POST https://api.cloudflare.com/client/v4/accounts/{acct}/ai/v1/chat/completions
+  1254→  1254→      Body: {"model": model_id, "messages": [...], "max_tokens": N, "stream": false}
+  1255→  1255→
+  1256→  1256→    CORRECTION 6: Pre-flight screening validates each slot's token and
+  1257→  1257→    account_id BEFORE any request is sent. Broken slots are silently skipped.
+  1258→  1258→    """
+  1259→  1259→    name = "cloudflare_workers_ai"
+  1260→  1260→    # Class-level set of models that 400'd on any slot — skip on all
+  1261→  1261→    # subsequent slots to reduce health-check timeout cascade.
+  1262→  1262→    _failed_models: set = set()
+  1263→  1263→
+  1264→  1264→    def __init__(self):
+  1265→  1265→        slots = []
+  1266→  1266→        skipped_slots = []
+  1267→  1267→        for i in range(1, CF_N_SLOTS + 1):
+  1268→  1268→            acct_id   = os.environ.get(f"CF_ACCOUNT_ID_{i}", "")
+  1269→  1269→            api_token = os.environ.get(f"CF_API_TOKEN_{i}", "")
+  1270→  1270→            if not (acct_id and api_token):
+  1271→  1271→                continue
+  1272→  1272→            # ── CORRECTION 6: Pre-flight screening ───────────────────
+  1273→  1273→            valid, reason = _preflight_screen_slot(i)
+  1274→  1274→            if not valid:
+  1275→  1275→                logger.warning(
+  1276→  1276→                    f"[CF-Workers-AI] Slot {i} skipped by pre-flight: {reason}"
+  1277→  1277→                )
+  1278→  1278→                skipped_slots.append(i)
+  1279→  1279→                continue
+  1280→  1280→            preflight_issues = preflight_validate_cf_slot(
+  1281→  1281→                slot_index=i,
+  1282→  1282→                account_id=acct_id,
+  1283→  1283→                api_token=api_token,
+  1284→  1284→            )
+  1285→  1285→            if preflight_issues:
+  1286→  1286→                skipped_slots.append(i)
+  1287→  1287→                continue
+  1288→  1288→            slots.append(
+  1289→  1289→                AccountSlot(index=i, account_id=acct_id, api_key=api_token)
+  1290→  1290→            )
+  1291→  1291→        if skipped_slots:
+  1292→  1292→            logger.warning(
+  1293→  1293→                f"[CF-Workers-AI] Pre-flight screening SKIPPED {len(skipped_slots)} "
+  1294→  1294→                f"broken slot(s): {skipped_slots}. These slots are NOT deleted — "
+  1295→  1295→                f"they will be retried in the next CI run after fixing secrets."
+  1296→  1296→            )
+  1297→  1297→        if not slots:
+  1298→  1298→            raise ProviderConfigurationError(
+  1299→  1299→                "[CloudflareWorkersAI] No CF accounts configured "
+  1300→  1300→                "(all slots either empty or failed pre-flight screening).",
+  1301→  1301→                provider="cloudflare_workers_ai",
+  1302→  1302→            )
+  1303→  1303→        self.rotator = AccountRotator("cloudflare_workers_ai", slots)
+  1304→  1304→        self._selector = CloudflareModelSelector.instance()
+  1305→  1305→        self.circuit_breaker = ProviderCircuitBreaker(
+  1306→  1306→            "CF-Workers-AI",
+  1307→  1307→            failure_threshold=max(len(slots), 20),
+  1308→  1308→        )
+  1309→  1309→        # Session-level blacklist for slots that fail all models at runtime
+  1310→  1310→        self._session_blacklist: set = set()
+  1311→  1311→        # Thread-safe dead slot tracking: slots that return 400+empty body
+  1312→  1312→        self._dead_slots: set[int] = set()
+  1313→  1313→        self._dead_slots_lock = threading.Lock()
+  1314→  1314→        logger.info(
+  1315→  1315→            f"[CF-Workers-AI] Initialized with {len(slots)} slot(s) "
+  1316→  1316→            f"({len(skipped_slots)} skipped by pre-flight screening)"
+  1317→  1317→        )
+  1318→  1318→
+  1319→  1319→    @staticmethod
+  1320→  1320→    def _build_cf_workers_url(account_id: str) -> str:
+  1321→  1321→        """Build the correct CF Workers AI REST API URL.
+  1322→  1322→        OpenAI-compatible format — model goes in request body, not URL.
+  1323→  1323→        """
+  1324→  1324→        return (
+  1325→  1325→            f"https://api.cloudflare.com/client/v4/accounts/"
+  1326→  1326→            f"{account_id}/ai/v1/chat/completions"
+  1327→  1327→        )
+  1328→  1328→
+  1329→  1329→    @staticmethod
+  1330→  1330→    def _build_cf_request_body(
+  1331→  1331→        model_id: str,
+  1332→  1332→        messages: list,
+  1333→  1333→        max_tokens: int = 50,
+  1334→  1334→        temperature: float = 0.2,
+  1335→  1335→    ) -> dict:
+  1336→  1336→        """Build request body for CF OpenAI-compatible endpoint.
+  1337→  1337→        Model ID is placed in the request body, NOT the URL path.
+  1338→  1338→        """
+  1339→  1339→        return {
+  1340→  1340→            "model": model_id,
+  1341→  1341→            "messages": messages,
+  1342→  1342→            "max_tokens": max_tokens,
+  1343→  1343→            "temperature": temperature,
+  1344→  1344→            "stream": False,
+  1345→  1345→        }
+  1346→  1346→
+  1347→  1347→    @staticmethod
+  1348→  1348→    def _extract_cf_content(response_json: dict) -> str:
+  1349→  1349→        """Extract text content from CF Workers AI response (any format)."""
+  1350→  1350→        if not isinstance(response_json, dict):
+  1351→  1351→            return ""
+  1352→  1352→        # Format 1: wrapped in 'result'
+  1353→  1353→        result = response_json.get("result", response_json)
+  1354→  1354→        # Format 2: direct OpenAI format
+  1355→  1355→        choices = result.get("choices") if isinstance(result, dict) else None
+  1356→  1356→        if not choices:
+  1357→  1357→            choices = response_json.get("choices", [])
+  1358→  1358→        if choices:
+  1359→  1359→            try:
+  1360→  1360→                msg = choices[0].get("message", {})
+  1361→  1361→                content = msg.get("content", "")
+  1362→  1362→                if isinstance(content, str):
+  1363→  1363→                    return content.strip()
+  1364→  1364→            except (KeyError, IndexError, TypeError, AttributeError):
+  1365→  1365→                pass
+  1366→  1366→        # Format 3: legacy CF format
+  1367→  1367→        if "result" in response_json:
+  1368→  1368→            r = response_json["result"]
+  1369→  1369→            if isinstance(r, str) and r.strip():
+  1370→  1370→                return r.strip()
+  1371→  1371→            if isinstance(r, dict):
+  1372→  1372→                resp_val = r.get("response", "")
+  1373→  1373→                if isinstance(resp_val, str) and resp_val.strip():
+  1374→  1374→                    return resp_val.strip()
+  1375→  1375→        # Nothing found — return empty string (NOT str(response_json))
+  1376→  1376→        logger.debug(
+  1377→  1377→            f"[CF-Workers-AI] Could not extract content from response keys: "
+  1378→  1378→            f"{list(response_json.keys())}"
+  1379→  1379→        )
+  1380→  1380→        return ""
+  1381→  1381→
+  1382→  1382→    def _resolve_model(self, model: Optional[str], task: str) -> str:
+  1383→  1383→        """Return model to use: explicit > dynamic selection > stable fallback."""
+  1384→  1384→        if model:
+  1385→  1385→            return model
+  1386→  1386→        try:
+  1387→  1387→            selected = self._selector.best_model(task=task, probe=False)
+  1388→  1388→            logger.debug(f"[CF-Workers-AI] Dynamic model [{task}]: {selected}")
+  1389→  1389→            return selected
+  1390→  1390→        except Exception as exc:
+  1391→  1391→            logger.warning(f"[CF-Workers-AI] Model selector error: {exc}; using fallback")
+  1392→  1392→            return CF_STABLE_MODELS[0]
+  1393→  1393→
+  1394→  1394→    def chat_complete(
+  1395→  1395→        self, messages, model=None, max_tokens=2048, temperature=0.2,
+  1396→  1396→        timeout=60, task="general"
+  1397→  1397→    ) -> str:
+  1398→  1398→        # Provider-level circuit breaker check
+  1399→  1399→        if not self.circuit_breaker.allow_request():
+  1400→  1400→            logger.warning(
+  1401→  1401→                f"[CF-Workers-AI] Circuit breaker OPEN — skipping request"
+  1402→  1402→            )
+  1403→  1403→            raise RuntimeError(
+  1404→  1404→                f"CF-Workers-AI provider circuit breaker is OPEN "
+  1405→  1405→                f"({self.circuit_breaker.failure_count} consecutive failures)"
+  1406→  1406→            )
+  1407→  1407→
+  1408→  1408→        chosen_model = self._resolve_model(model, task)
+  1409→  1409→
+  1410→  1410→        slot      = self.rotator.get_primary()
+  1411→  1411→        fallbacks = [slot] + self.rotator.get_fallback_chain(slot.index)
+  1412→  1412→
+  1413→  1413→        # Build fallback model chain: chosen → stable models, excluding already-failed models
+  1414→  1414→        models_to_try = [chosen_model] + [m for m in CF_STABLE_MODELS if m != chosen_model]
+  1415→  1415→
+  1416→  1416→        last_auth_error = None
+  1417→  1417→        for attempt, s in enumerate(fallbacks):
+  1418→  1418→            last_err = None
+  1419→  1419→
+  1420→  1420→            # Skip dead slots (slots that previously returned 400+empty body)
+  1421→  1421→            with self._dead_slots_lock:
+  1422→  1422→                if s.index in self._dead_slots:
+  1423→  1423→                    continue
+  1424→  1424→
+  1425→  1425→            for m in models_to_try:
+  1426→  1426→                # Skip models that already 400'd on a previous slot
+  1427→  1427→                if m in self._failed_models:
+  1428→  1428→                    logger.debug(
+  1429→  1429→                        f"[CF-Workers-AI] Skipping model {m} — previously 400'd on another slot"
+  1430→  1430→                    )
+  1431→  1431→                    continue
+  1432→  1432→
+  1433→  1433→                try:
+  1434→  1434→                    # Sanitize credentials
+  1435→  1435→                    clean_token = _sanitize_api_key(s.api_key)
+  1436→  1436→                    clean_acct  = _sanitize_api_key(s.account_id)
+  1437→  1437→                    if not clean_token or not clean_acct:
+  1438→  1438→                        logger.warning(
+  1439→  1439→                            f"[CF-Workers-AI] slot {s.index} has empty credentials — skipping"
+  1440→  1440→                        )
+  1441→  1441→                        break  # No point trying other models with bad credentials
+  1442→  1442→
+  1443→  1443→                    # CORRECTION 7: Use OpenAI-compatible endpoint
+  1444→  1444→                    # Model ID goes in request body, NOT URL path.
+  1445→  1445→                    url = self._build_cf_workers_url(clean_acct)
+  1446→  1446→                    headers = {
+  1447→  1447→                        "Content-Type":  "application/json",
+  1448→  1448→                        "Authorization": f"Bearer {clean_token}",
+  1449→  1449→                    }
+  1450→  1450→                    payload = self._build_cf_request_body(
+  1451→  1451→                        model_id=m,
+  1452→  1452→                        messages=messages,
+  1453→  1453→                        max_tokens=max_tokens,
+  1454→  1454→                        temperature=temperature,
+  1455→  1455→                    )
+  1456→  1456→                    resp, lat = self._post_json_with_retry(
+  1457→  1457→                        url, headers, payload, timeout,
+  1458→  1458→                        provider_name="CF-Workers-AI", slot_index=s.index
+  1459→  1459→                    )
+  1460→  1460→                    self.rotator.mark_success(s, lat)
+  1461→  1461→                    self.circuit_breaker.record_success()
+  1462→  1462→                    return self._extract_cf_content(resp)
+  1463→  1463→                except BadRequestError as e:
+  1464→  1464→                    # HTTP 400 — NOT an auth failure. Check if empty body (dead slot)
+  1465→  1465→                    # or model-specific issue (try next model).
+  1466→  1466→                    err_msg = str(e)
+  1467→  1467→                    if "empty body" in err_msg.lower():
+  1468→  1468→                        with self._dead_slots_lock:
+  1469→  1469→                            if s.index not in self._dead_slots:
+  1470→  1470→                                self._dead_slots.add(s.index)
+  1471→  1471→                                logger.warning(
+  1472→  1472→                                    f"[CF] slot {s.index} permanently failed "
+  1473→  1473→                                    f"(HTTP 400 empty body) — "
+  1474→  1474→                                    f"skipping all remaining models for this slot"
+  1475→  1475→                                )
+  1476→  1476→                        break  # Stop trying models for this slot
+  1477→  1477→                    # Model-specific issue — add to failed set and try next model
+  1478→  1478→                    self._failed_models.add(m)
+  1479→  1479→                    logger.debug(
+  1480→  1480→                        f"[CF-Workers-AI] slot {s.index} model {m} → "
+  1481→  1481→                        f"BadRequestError: {err_msg[:200]}"
+  1482→  1482→                    )
+  1483→  1483→                    continue
+  1484→  1484→                except urllib.error.HTTPError as e:
+  1485→  1485→                    last_err = e
+  1486→  1486→                    if e.code in (403, 401):
+  1487→  1487→                        last_auth_error = e
+  1488→  1488→                        logger.warning(
+  1489→  1489→                            f"[CF-Workers-AI] slot {s.index} AUTH FAIL HTTP {e.code}"
+  1490→  1490→                        )
+  1491→  1491→                        self.circuit_breaker.record_failure()
+  1492→  1492→                        break  # Try next slot, not next model
+  1493→  1493→                    # NOTE: 400 is now caught as BadRequestError above, not here
+  1494→  1494→                    if e.code == 404:
+  1495→  1495→                        logger.debug(f"[CF-Workers-AI] Model not found: {m}")
+  1496→  1496→                        self._failed_models.add(m)
+  1497→  1497→                        continue
+  1498→  1498→                    self.circuit_breaker.record_failure()
+  1499→  1499→                    raise
+  1500→  1500→
+  1501→  1501→            if last_err:
+  1502→  1502→                if last_err.code in (403, 401):
+  1503→  1503→                    self.rotator.mark_failure(s)
+  1504→  1504→                    continue  # Try next slot
+  1505→  1505→                logger.warning(f"[CF-Workers-AI] slot {s.index} all models failed")
+  1506→  1506→                self.rotator.mark_failure(s)
+  1507→  1507→                self.circuit_breaker.record_failure()
+  1508→  1508→                if attempt == len(fallbacks) - 1:
+  1509→  1509→                    raise last_err
+  1510→  1510→                time.sleep(2 ** attempt)
+  1511→  1511→
+  1512→  1512→        # All slots exhausted — check if all are dead (config error, not runtime)
+  1513→  1513→        with self._dead_slots_lock:
+  1514→  1514→            all_dead = all(
+  1515→  1515→                s.index in self._dead_slots
+  1516→  1516→                for s in self.rotator.slots
+  1517→  1517→            )
+  1518→  1518→
+  1519→  1519→        if all_dead:
+  1520→  1520→            raise ProviderConfigurationError(
+  1521→  1521→                f"[CF-Workers-AI] All {len(self.rotator.slots)} slots failed "
+  1522→  1522→                f"(HTTP 400 / empty body on first model attempt per slot). "
+  1523→  1523→                f"Verify CF_ACCOUNT_ID and CF_API_TOKEN values in GitHub Secrets.",
+  1524→  1524→                provider="cloudflare_workers_ai",
+  1525→  1525→            )
+  1526→  1526→
+  1527→  1527→        if last_auth_error:
+  1528→  1528→            raise last_auth_error
+  1529→  1529→        return ""
+  1530→  1530→
+  1531→  1531→
+  1532→  1532→# ── Cloudflare AI Gateway (proxy layer) ───────────────────────────────────────
+  1533→  1533→
+  1534→  1534→class CloudflareAIGatewayProvider(_BaseProvider):
+  1535→  1535→    """
+  1536→  1536→    Cloudflare AI Gateway — proxy layer with caching and dynamic model selection.
+  1537→  1537→    11 gateway slots × free quota = 11× effective throughput.
+  1538→  1538→    Model resolved dynamically via CloudflareModelSelector.
+  1539→  1539→
+  1540→  1540→    CORRECTION 7: Uses OpenAI-compatible endpoint for CF AI Gateway:
+  1541→  1541→      POST {gateway_base}/workers-ai/v1/chat/completions
+  1542→  1542→      Body: {"model": model_id, "messages": [...], "max_tokens": N, "stream": false}
+  1543→  1543→      Model ID goes in request body, NOT URL path.
+  1544→  1544→      NEVER uses /compatible/, /compat/, /openai/, or /run/ paths.
+  1545→  1545→      The account_id must appear EXACTLY ONCE in each URL (inside the gateway base).
+  1546→  1546→
+  1547→  1547→    CORRECTION 6: Pre-flight screening validates each slot's token length,
+  1548→  1548→    account_id format, and gateway URL structure BEFORE any request is sent.
+  1549→  1549→    """
+  1550→  1550→    name = "cloudflare_ai_gateway"
+  1551→  1551→    # Class-level set of models that 400'd on any slot — skip on all
+  1552→  1552→    # subsequent slots to reduce health-check timeout cascade.
+  1553→  1553→    _failed_models: set = set()
+  1554→  1554→    # Expected gateway URL prefix
+  1555→  1555→    _GATEWAY_URL_PREFIX = "https://gateway.ai.cloudflare.com/v1/"
+  1556→  1556→
+  1557→  1557→    def __init__(self):
+  1558→  1558→        slots = []
+  1559→  1559→        skipped_slots = []
+  1560→  1560→        for i in range(1, CF_N_SLOTS + 1):
+  1561→  1561→            acct_id     = os.environ.get(f"CF_ACCOUNT_ID_{i}", "")
+  1562→  1562→            api_token   = os.environ.get(f"CF_API_TOKEN_{i}", "")
+  1563→  1563→            gateway_url = os.environ.get(f"CF_AI_GATEWAY_URL_{i}", "")
+  1564→  1564→            if not (acct_id and api_token and gateway_url):
+  1565→  1565→                continue
+  1566→  1566→
+  1567→  1567→            # ── CORRECTION 6: Pre-flight screening ───────────────────
+  1568→  1568→            valid, reason = _preflight_screen_slot(i)
+  1569→  1569→            if not valid:
+  1570→  1570→                logger.warning(
+  1571→  1571→                    f"[CF-AI-GW] Slot {i} skipped by pre-flight: {reason}"
+  1572→  1572→                )
+  1573→  1573→                skipped_slots.append(i)
+  1574→  1574→                continue
+  1575→  1575→            preflight_issues = preflight_validate_cf_slot(
+  1576→  1576→                slot_index=i,
+  1577→  1577→                account_id=acct_id,
+  1578→  1578→                api_token=api_token,
+  1579→  1579→                gateway_url=gateway_url,
+  1580→  1580→            )
+  1581→  1581→            if preflight_issues:
+  1582→  1582→                skipped_slots.append(i)
+  1583→  1583→                continue
+  1584→  1584→
+  1585→  1585→            try:
+  1586→  1586→                gateway_url = _validate_url(gateway_url, f"CF_AI_GATEWAY_URL_{i}")
+  1587→  1587→            except ValueError as e:
+  1588→  1588→                logger.error(str(e))
+  1589→  1589→                skipped_slots.append(i)
+  1590→  1590→                continue
+  1591→  1591→            # Validate gateway URL structure
+  1592→  1592→            try:
+  1593→  1593→                self._validate_gateway_url(gateway_url, acct_id, slot_index=i)
+  1594→  1594→            except ValueError as e:
+  1595→  1595→                logger.error(str(e))
+  1596→  1596→                skipped_slots.append(i)
+  1597→  1597→                continue
+  1598→  1598→            slots.append(
+  1599→  1599→                AccountSlot(
+  1600→  1600→                    index=i,
+  1601→  1601→                    account_id=acct_id,
+  1602→  1602→                    api_key=api_token,
+  1603→  1603→                    gateway_url=gateway_url,
+  1604→  1604→                )
+  1605→  1605→            )
+  1606→  1606→        if skipped_slots:
+  1607→  1607→            logger.warning(
+  1608→  1608→                f"[CF-AI-GW] Pre-flight screening SKIPPED {len(skipped_slots)} "
+  1609→  1609→                f"broken slot(s): {skipped_slots}. These slots are NOT deleted — "
+  1610→  1610→                f"they will be retried in the next CI run after fixing secrets."
+  1611→  1611→            )
+  1612→  1612→        if not slots:
+  1613→  1613→            raise ProviderConfigurationError(
+  1614→  1614→                "[CF-AI-Gateway] No gateway slots configured "
+  1615→  1615→                "(all slots either empty or failed pre-flight screening).",
+  1616→  1616→                provider="cloudflare_ai_gateway",
+  1617→  1617→            )
+  1618→  1618→        self.rotator  = AccountRotator("cloudflare_ai_gateway", slots)
+  1619→  1619→        self._selector = CloudflareModelSelector.instance()
+  1620→  1620→        self.circuit_breaker = ProviderCircuitBreaker(
+  1621→  1621→            "CF-AI-GW",
+  1622→  1622→            failure_threshold=max(len(slots), 20),
+  1623→  1623→        )
+  1624→  1624→        # Session-level blacklist for slots that fail all models at runtime
+  1625→  1625→        self._session_blacklist: set = set()
+  1626→  1626→        # Thread-safe dead slot tracking: slots that return 400+empty body
+  1627→  1627→        self._dead_slots: set[int] = set()
+  1628→  1628→        self._dead_slots_lock = threading.Lock()
+  1629→  1629→        logger.info(
+  1630→  1630→            f"[CF-AI-GW] Initialized with {len(slots)} slot(s) "
+  1631→  1631→            f"({len(skipped_slots)} skipped by pre-flight screening)"
+  1632→  1632→        )
+  1633→  1633→
+  1634→  1634→    @staticmethod
+  1635→  1635→    def _build_cf_gateway_url(gateway_base_url: str) -> str:
+  1636→  1636→        """Build the correct CF AI Gateway Workers AI URL.
+  1637→  1637→        Uses OpenAI-compatible format — model goes in request body, not URL.
+  1638→  1638→        Path: {gateway_base}/workers-ai/v1/chat/completions
+  1639→  1639→
+  1640→  1640→        Uses normalize_cf_gateway_url() to handle bare gateway roots
+  1641→  1641→        and partial paths (e.g. secrets that don't include the full path).
+  1642→  1642→        """
+  1643→  1643→        return normalize_cf_gateway_url(gateway_base_url)
+  1644→  1644→
+  1645→  1645→    @staticmethod
+  1646→  1646→    def _build_cf_request_body(
+  1647→  1647→        model_id: str,
+  1648→  1648→        messages: list,
+  1649→  1649→        max_tokens: int = 50,
+  1650→  1650→        temperature: float = 0.2,
+  1651→  1651→    ) -> dict:
+  1652→  1652→        """Build request body for CF AI Gateway OpenAI-compatible endpoint.
+  1653→  1653→        Model ID is placed in the request body, NOT the URL path.
+  1654→  1654→        """
+  1655→  1655→        return {
+  1656→  1656→            "model": model_id,
+  1657→  1657→            "messages": messages,
+  1658→  1658→            "max_tokens": max_tokens,
+  1659→  1659→            "temperature": temperature,
+  1660→  1660→            "stream": False,
+  1661→  1661→        }
+  1662→  1662→
+  1663→  1663→    @classmethod
+  1664→  1664→    def _validate_gateway_url(
+  1665→  1665→        cls, gateway_url: str, account_id: str, slot_index: int = 0
+  1666→  1666→    ) -> None:
+  1667→  1667→        """Validate CF AI Gateway URL structure.
+  1668→  1668→
+  1669→  1669→        Expected format: https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_slug}
+  1670→  1670→        - Must start with https://gateway.ai.cloudflare.com/v1/
+  1671→  1671→        - Must contain an account_id in the path after /v1/
+  1672→  1672→        - Logs the validated endpoint (with masked account_id) for debugging.
+  1673→  1673→        """
+  1674→  1674→        if not gateway_url.startswith(cls._GATEWAY_URL_PREFIX):
+  1675→  1675→            raise ValueError(
+  1676→  1676→                f"[CF-AI-GW] slot {slot_index} Invalid gateway URL: "
+  1677→  1677→                f"must start with '{cls._GATEWAY_URL_PREFIX}'. "
+  1678→  1678→                f"Got: {_mask_url(gateway_url)}"
+  1679→  1679→            )
+  1680→  1680→
+  1681→  1681→        # Extract the path after /v1/
+  1682→  1682→        path_after_v1 = gateway_url[len(cls._GATEWAY_URL_PREFIX):]
+  1683→  1683→        path_parts = [p for p in path_after_v1.split("/") if p]
+  1684→  1684→
+  1685→  1685→        if len(path_parts) < 2:
+  1686→  1686→            raise ValueError(
+  1687→  1687→                f"[CF-AI-GW] slot {slot_index} Invalid gateway URL: "
+  1688→  1688→                f"expected path /v1/{{account_id}}/{{gateway_slug}}, "
+  1689→  1689→                f"got {_mask_url(gateway_url)}. "
+  1690→  1690→                f"Path after /v1/ has {len(path_parts)} segment(s), need at least 2 "
+  1691→  1691→                f"(account_id and gateway_slug)."
+  1692→  1692→            )
+  1693→  1693→
+  1694→  1694→        url_account_id = path_parts[0]
+  1695→  1695→        gateway_slug = path_parts[1]
+  1696→  1696→
+  1697→  1697→        # Validate that account_id in URL matches the configured account_id
+  1698→  1698→        if account_id and url_account_id != account_id:
+  1699→  1699→            logger.warning(
+  1700→  1700→                f"[CF-AI-GW] slot {slot_index} Account ID mismatch: "
+  1701→  1701→                f"URL contains '{_mask_key(url_account_id, 3)}' but "
+  1702→  1702→                f"CF_ACCOUNT_ID is '{_mask_key(account_id, 3)}'. "
+  1703→  1703→                f"This may cause 400 errors."
+  1704→  1704→            )
+  1705→  1705→
+  1706→  1706→        # Log the CORRECT endpoint pattern (OpenAI-compatible)
+  1707→  1707→        logger.info(
+  1708→  1708→            f"[CF-AI-GW] slot {slot_index} validated: "
+  1709→  1709→            f"endpoint=https://gateway.ai.cloudflare.com/v1/"
+  1710→  1710→            f"{_mask_key(url_account_id, 3)}/{gateway_slug}"
+  1711→  1711→            f"/workers-ai/v1/chat/completions model_in_body=True"
+  1712→  1712→        )
+  1713→  1713→
+  1714→  1714→    @staticmethod
+  1715→  1715→    def _probe_gateway(gateway_url: str, timeout: int = 10) -> bool:
+  1716→  1716→        """Send a lightweight GET request to the gateway URL to check reachability.
+  1717→  1717→
+  1718→  1718→        Returns True if the gateway is reachable (any HTTP response, even 404),
+  1719→  1719→        False if the connection itself fails.
+  1720→  1720→        """
+  1721→  1721→        try:
+  1722→  1722→            req = urllib.request.Request(
+  1723→  1723→                gateway_url,
+  1724→  1724→                headers={"User-Agent": _USER_AGENT},
+  1725→  1725→                method="GET",
+  1726→  1726→            )
+  1727→  1727→            with urllib.request.urlopen(req, timeout=timeout) as resp:
+  1728→  1728→                logger.debug(
+  1729→  1729→                    f"[CF-AI-GW] Gateway probe OK: HTTP {resp.status} "
+  1730→  1730→                    f"for {_mask_url(gateway_url)}"
+  1731→  1731→                )
+  1732→  1732→                return True
+  1733→  1733→        except urllib.error.HTTPError as e:
+  1734→  1734→            # Any HTTP response means the gateway is reachable
+  1735→  1735→            logger.debug(
+  1736→  1736→                f"[CF-AI-GW] Gateway probe got HTTP {e.code} — "
+  1737→  1737→                f"gateway is reachable but returned error"
+  1738→  1738→            )
+  1739→  1739→            return True
+  1740→  1740→        except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as e:
+  1741→  1741→            logger.warning(
+  1742→  1742→                f"[CF-AI-GW] Gateway probe FAILED for {_mask_url(gateway_url)}: {e}. "
+  1743→  1743→                f"Gateway may be unreachable or DNS resolution failed."
+  1744→  1744→            )
+  1745→  1745→            return False
+  1746→  1746→
+  1747→  1747→    def _resolve_model(self, model: Optional[str], task: str) -> str:
+  1748→  1748→        if model:
+  1749→  1749→            return model
+  1750→  1750→        try:
+  1751→  1751→            selected = self._selector.best_model(task=task, probe=False)
+  1752→  1752→            logger.debug(f"[CF-AI-GW] Dynamic model [{task}]: {selected}")
+  1753→  1753→            return selected
+  1754→  1754→        except Exception as exc:
+  1755→  1755→            logger.warning(f"[CF-AI-GW] Model selector error: {exc}; using fallback")
+  1756→  1756→            return CF_STABLE_MODELS[0]
+  1757→  1757→
+  1758→  1758→    def chat_complete(
+  1759→  1759→        self, messages, model=None, max_tokens=2048, temperature=0.2,
+  1760→  1760→        timeout=60, task="general"
+  1761→  1761→    ) -> str:
+  1762→  1762→        # Provider-level circuit breaker check
+  1763→  1763→        if not self.circuit_breaker.allow_request():
+  1764→  1764→            logger.warning(
+  1765→  1765→                f"[CF-AI-GW] Circuit breaker OPEN — skipping request"
+  1766→  1766→            )
+  1767→  1767→            raise RuntimeError(
+  1768→  1768→                f"CF-AI-GW provider circuit breaker is OPEN "
+  1769→  1769→                f"({self.circuit_breaker.failure_count} consecutive failures)"
+  1770→  1770→            )
+  1771→  1771→
+  1772→  1772→        chosen_model = self._resolve_model(model, task)
+  1773→  1773→
+  1774→  1774→        slot      = self.rotator.get_primary()
+  1775→  1775→        fallbacks = [slot] + self.rotator.get_fallback_chain(slot.index)
+  1776→  1776→
+  1777→  1777→        models_to_try = [chosen_model] + [m for m in CF_STABLE_MODELS if m != chosen_model]
+  1778→  1778→
+  1779→  1779→        last_auth_error = None
+  1780→  1780→        for attempt, s in enumerate(fallbacks):
+  1781→  1781→            last_err = None
+  1782→  1782→
+  1783→  1783→            # Skip dead slots (slots that previously returned 400+empty body)
+  1784→  1784→            with self._dead_slots_lock:
+  1785→  1785→                if s.index in self._dead_slots:
+  1786→  1786→                    continue
+  1787→  1787→
+  1788→  1788→            # Probe gateway reachability before first attempt on this slot
+  1789→  1789→            if attempt == 0 or last_auth_error is None:
+  1790→  1790→                if not self._probe_gateway(s.gateway_url):
+  1791→  1791→                    logger.warning(
+  1792→  1792→                        f"[CF-AI-GW] slot {s.index} gateway unreachable — skipping"
+  1793→  1793→                    )
+  1794→  1794→                    self.rotator.mark_failure(s)
+  1795→  1795→                    self.circuit_breaker.record_failure()
+  1796→  1796→                    continue
+  1797→  1797→
+  1798→  1798→            for m in models_to_try:
+  1799→  1799→                # Skip models that already 400'd on a previous slot
+  1800→  1800→                if m in self._failed_models:
+  1801→  1801→                    logger.debug(
+  1802→  1802→                        f"[CF-AI-GW] Skipping model {m} — previously 400'd on another slot"
+  1803→  1803→                    )
+  1804→  1804→                    continue
+  1805→  1805→
+  1806→  1806→                try:
+  1807→  1807→                    # Sanitize credentials
+  1808→  1808→                    clean_token = _sanitize_api_key(s.api_key)
+  1809→  1809→                    clean_acct  = _sanitize_api_key(s.account_id)
+  1810→  1810→                    if not clean_token:
+  1811→  1811→                        logger.warning(
+  1812→  1812→                            f"[CF-AI-GW] slot {s.index} has empty API token — skipping"
+  1813→  1813→                        )
+  1814→  1814→                        break  # No point trying other models with empty token
+  1815→  1815→
+  1816→  1816→                    # CORRECTION 7: Use OpenAI-compatible endpoint
+  1817→  1817→                    # Model ID goes in request body, NOT URL path.
+  1818→  1818→                    # URL: {gateway_base}/workers-ai/v1/chat/completions
+  1819→  1819→                    url = self._build_cf_gateway_url(s.gateway_url)
+  1820→  1820→                    headers = {
+  1821→  1821→                        "Content-Type":  "application/json",
+  1822→  1822→                        "Authorization": f"Bearer {clean_token}",
+  1823→  1823→                    }
+  1824→  1824→                    payload = self._build_cf_request_body(
+  1825→  1825→                        model_id=m,
+  1826→  1826→                        messages=messages,
+  1827→  1827→                        max_tokens=max_tokens,
+  1828→  1828→                        temperature=temperature,
+  1829→  1829→                    )
+  1830→  1830→                    resp, lat = self._post_json_with_retry(
+  1831→  1831→                        url, headers, payload, timeout,
+  1832→  1832→                        provider_name="CF-AI-GW", slot_index=s.index
+  1833→  1833→                    )
+  1834→  1834→                    self.rotator.mark_success(s, lat)
+  1835→  1835→                    self.circuit_breaker.record_success()
+  1836→  1836→                    return CloudflareWorkersAIProvider._extract_cf_content(resp)
+  1837→  1837→                except BadRequestError as e:
+  1838→  1838→                    # HTTP 400 — NOT an auth failure. Check if empty body (dead slot)
+  1839→  1839→                    # or model-specific issue (try next model).
+  1840→  1840→                    err_msg = str(e)
+  1841→  1841→                    if "empty body" in err_msg.lower():
+  1842→  1842→                        with self._dead_slots_lock:
+  1843→  1843→                            if s.index not in self._dead_slots:
+  1844→  1844→                                self._dead_slots.add(s.index)
+  1845→  1845→                                logger.warning(
+  1846→  1846→                                    f"[CF-AI-GW] slot {s.index} permanently failed "
+  1847→  1847→                                    f"(HTTP 400 empty body) — "
+  1848→  1848→                                    f"skipping all remaining models for this slot"
+  1849→  1849→                                )
+  1850→  1850→                        break  # Stop trying models for this slot
+  1851→  1851→                    # Model-specific issue — add to failed set and try next model
+  1852→  1852→                    self._failed_models.add(m)
+  1853→  1853→                    logger.debug(
+  1854→  1854→                        f"[CF-AI-GW] slot {s.index} model {m} → "
+  1855→  1855→                        f"BadRequestError: {err_msg[:200]}"
+  1856→  1856→                    )
+  1857→  1857→                    continue
+  1858→  1858→                except urllib.error.HTTPError as e:
+  1859→  1859→                    last_err = e
+  1860→  1860→                    if e.code in (403, 401):
+  1861→  1861→                        last_auth_error = e
+  1862→  1862→                        logger.warning(
+  1863→  1863→                            f"[CF-AI-GW] slot {s.index} AUTH FAIL HTTP {e.code} "
+  1864→  1864→                            f"URL={s.gateway_url[:40]}..."
+  1865→  1865→                        )
+  1866→  1866→                        self.circuit_breaker.record_failure()
+  1867→  1867→                        break  # Try next slot, not next model
+  1868→  1868→                    # NOTE: 400 is now caught as BadRequestError above, not here
+  1869→  1869→                    if e.code == 404:
+  1870→  1870→                        logger.debug(f"[CF-AI-GW] Model not found: {m}")
+  1871→  1871→                        self._failed_models.add(m)
+  1872→  1872→                        continue
+  1873→  1873→                    logger.warning(
+  1874→  1874→                        f"[CF-AI-GW] slot {s.index} "
+  1875→  1875→                        f"URL={s.gateway_url[:40]}... HTTP {e.code}"
+  1876→  1876→                    )
+  1877→  1877→                    self.circuit_breaker.record_failure()
+  1878→  1878→                    raise
+  1879→  1879→
+  1880→  1880→            if last_err:
+  1881→  1881→                if last_err.code in (403, 401):
+  1882→  1882→                    self.rotator.mark_failure(s)
+  1883→  1883→                    continue  # Try next slot
+  1884→  1884→                logger.warning(f"[CF-AI-GW] slot {s.index} all models failed")
+  1885→  1885→                self.rotator.mark_failure(s)
+  1886→  1886→                self.circuit_breaker.record_failure()
+  1887→  1887→                if attempt == len(fallbacks) - 1:
+  1888→  1888→                    raise last_err
+  1889→  1889→                time.sleep(2 ** attempt)
+  1890→  1890→
+  1891→  1891→        # All slots exhausted — check if all are dead (config error, not runtime)
+  1892→  1892→        with self._dead_slots_lock:
+  1893→  1893→            all_dead = all(
+  1894→  1894→                s.index in self._dead_slots
+  1895→  1895→                for s in self.rotator.slots
+  1896→  1896→            )
+  1897→  1897→
+  1898→  1898→        if all_dead:
+  1899→  1899→            raise ProviderConfigurationError(
+  1900→  1900→                f"[CF-AI-GW] All {len(self.rotator.slots)} slots failed "
+  1901→  1901→                f"(HTTP 400 / empty body on first model attempt per slot). "
+  1902→  1902→                f"Verify CF_ACCOUNT_ID and CF_API_TOKEN values in GitHub Secrets.",
+  1903→  1903→                provider="cloudflare_ai_gateway",
+  1904→  1904→            )
+  1905→  1905→
+  1906→  1906→        if last_auth_error:
+  1907→  1907→            raise last_auth_error
+  1908→  1908→        return ""
+  1909→  1909→

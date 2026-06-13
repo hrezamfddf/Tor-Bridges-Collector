@@ -168,20 +168,73 @@ jobs:
         env:
           CF_ACCOUNT_ID_1:  ${{ secrets.CF_ACCOUNT_ID_1 }}
           CF_API_TOKEN_1:   ${{ secrets.CF_API_TOKEN_1 }}
+          CF_ACCOUNT_ID_2:  ${{ secrets.CF_ACCOUNT_ID_2 }}
+          CF_API_TOKEN_2:   ${{ secrets.CF_API_TOKEN_2 }}
+          CF_ACCOUNT_ID_3:  ${{ secrets.CF_ACCOUNT_ID_3 }}
+          CF_API_TOKEN_3:   ${{ secrets.CF_API_TOKEN_3 }}
+          CF_ACCOUNT_ID_4:  ${{ secrets.CF_ACCOUNT_ID_4 }}
+          CF_API_TOKEN_4:   ${{ secrets.CF_API_TOKEN_4 }}
+          CF_ACCOUNT_ID_5:  ${{ secrets.CF_ACCOUNT_ID_5 }}
+          CF_API_TOKEN_5:   ${{ secrets.CF_API_TOKEN_5 }}
+          CF_ACCOUNT_ID_6:  ${{ secrets.CF_ACCOUNT_ID_6 }}
+          CF_API_TOKEN_6:   ${{ secrets.CF_API_TOKEN_6 }}
+          CF_ACCOUNT_ID_7:  ${{ secrets.CF_ACCOUNT_ID_7 }}
+          CF_API_TOKEN_7:   ${{ secrets.CF_API_TOKEN_7 }}
+          CF_ACCOUNT_ID_8:  ${{ secrets.CF_ACCOUNT_ID_8 }}
+          CF_API_TOKEN_8:   ${{ secrets.CF_API_TOKEN_8 }}
+          CF_ACCOUNT_ID_9:  ${{ secrets.CF_ACCOUNT_ID_9 }}
+          CF_API_TOKEN_9:   ${{ secrets.CF_API_TOKEN_9 }}
+          CF_ACCOUNT_ID_10: ${{ secrets.CF_ACCOUNT_ID_10 }}
+          CF_API_TOKEN_10:  ${{ secrets.CF_API_TOKEN_10 }}
+          CF_ACCOUNT_ID_11: ${{ secrets.CF_ACCOUNT_ID_11 }}
+          CF_API_TOKEN_11:  ${{ secrets.CF_API_TOKEN_11 }}
+          PORTKEY_API_KEY_1: ${{ secrets.PORTKEY_API_KEY_1 }}
+          PORTKEY_API_KEY_2: ${{ secrets.PORTKEY_API_KEY_2 }}
+          PORTKEY_API_KEY_3: ${{ secrets.PORTKEY_API_KEY_3 }}
         run: |
           cat > /tmp/_model_rankings.py << 'ENDSCRIPT'
-          import sys, os
+          import sys, os, asyncio
           sys.path.insert(0, ".")
           try:
-              from torshield_ai_gateway.model_selector import ranked_cf_models, model_selector_status
-              print("=== Dynamic Model Rankings ===")
+              from torshield_ai_gateway.dynamic_model_brain import DynamicModelBrain
+              brain = DynamicModelBrain()
+              asyncio.run(brain.refresh())
+              print("=== LIVE Dynamic Model Rankings ===")
+              print(f"Total fetched: {brain.summary()['total_models']} models")
               for task in ["general", "reasoning", "coding", "vision", "fast"]:
-                  top = ranked_cf_models(task=task, top_n=3)
-                  print(f"\n[{task}] top-3:")
+                  loop = asyncio.new_event_loop()
+                  top = loop.run_until_complete(
+                      brain.get_top_cf_hosted_models(task=task, top_n=3)
+                  )
+                  print(f"\n[{task}] top-3 (LIVE):")
                   for i, m in enumerate(top):
-                      print(f"  #{i+1} {m.id}  score={m.score}  tier={m.tier}  params={m.param_b}B")
+                      print(f"  #{i+1} {m.id}  score={m.score}  "
+                            f"params={m.param_b}B  ctx={m.context_k}k")
+              # Show anti-DPI assessment
+              try:
+                  from torshield_ai_gateway.dynamic_brain_anti_dpi import run_dpi_assessment
+                  assessment = run_dpi_assessment()
+                  print(f"\n=== Iran DPI Assessment ===")
+                  print(f"  Threat Level: {assessment.threat_level.value}")
+                  print(f"  Model Preference: {assessment.model_preference}")
+              except Exception as dpi_err:
+                  print(f"  DPI assessment unavailable: {dpi_err}")
           except Exception as e:
-              print(f"Model ranking unavailable: {e}")
+              import traceback
+              print(f"Dynamic ranking failed: {e}")
+              traceback.print_exc()
+              # Fall back to existing offline ranking
+              try:
+                  from torshield_ai_gateway.model_selector import (
+                      ranked_cf_models
+                  )
+                  print("=== Offline Fallback Rankings ===")
+                  for task in ["fast"]:
+                      top = ranked_cf_models(task=task, top_n=3)
+                      for i, m in enumerate(top):
+                          print(f"  #{i+1} {m.id}  score={m.score}")
+              except Exception as e2:
+                  print(f"Offline fallback also failed: {e2}")
           ENDSCRIPT
           python3 /tmp/_model_rankings.py
 

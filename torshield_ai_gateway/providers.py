@@ -110,6 +110,39 @@ from .rotator import AccountRotator, AccountSlot, build_rotator_from_env
 from .model_selector import CloudflareModelSelector, best_cf_model
 from .exceptions import ProviderConfigurationError
 
+# ── Dynamic Model Brain Integration (Fix-16.0) ────────────────────────────
+# Live model fetcher + intelligent scorer that replaces hardcoded model IDs
+# with dynamically fetched and scored models from CF + Portkey APIs.
+# Falls back to existing model_selector.py on any failure.
+try:
+    from .dynamic_model_brain import (
+        ranked_cf_models_live,
+        best_portkey_model_live,
+        best_cf_model_live,
+        globally_strongest_model_live,
+        get_brain,
+        refresh_brain_sync,
+        activate_anti_dpi_if_needed,
+    )
+    _DYNAMIC_BRAIN_AVAILABLE = True
+except ImportError:
+    _DYNAMIC_BRAIN_AVAILABLE = False
+    logger.warning(
+        "[Providers] dynamic_model_brain not available — "
+        "using offline model_selector fallback"
+    )
+
+# ── Dynamic Brain Anti-DPI Integration ────────────────────────────────────
+try:
+    from .dynamic_brain_anti_dpi import (
+        get_dpi_adapter,
+        run_dpi_assessment,
+        DPIThreatLevel,
+    )
+    _DPI_ADAPTER_AVAILABLE = True
+except ImportError:
+    _DPI_ADAPTER_AVAILABLE = False
+
 logger = logging.getLogger("torshield.ai.providers")
 
 # Number of Cloudflare slots
@@ -935,6 +968,20 @@ class PortkeyProvider(_BaseProvider):
             )
 
         explicit_model = model
+        # ── Dynamic Brain Integration (Fix-16.0) ─────────────────────
+        # Try live model selection from DynamicModelBrain first.
+        # Falls back to DEFAULT_MODEL if brain is unavailable.
+        if not explicit_model and _DYNAMIC_BRAIN_AVAILABLE:
+            try:
+                _live_pk = best_portkey_model_live(task=task)
+                if _live_pk:
+                    explicit_model = _live_pk.id
+                    logger.debug(
+                        f"[Portkey] Dynamic Brain selected: {explicit_model} "
+                        f"(score={_live_pk.score})"
+                    )
+            except Exception as exc:
+                logger.debug(f"[Portkey] Brain model fetch failed: {exc}")
         chosen_model   = explicit_model or self.DEFAULT_MODEL
         models_to_try  = [chosen_model] + [m for m in self.PORTKEY_MODELS if m != chosen_model]
 
@@ -1380,9 +1427,23 @@ class CloudflareWorkersAIProvider(_BaseProvider):
         return ""
 
     def _resolve_model(self, model: Optional[str], task: str) -> str:
-        """Return model to use: explicit > dynamic selection > stable fallback."""
+        """Return model to use: explicit > dynamic brain > dynamic selection > stable fallback."""
         if model:
             return model
+        # ── Dynamic Brain Integration (Fix-16.0) ─────────────────────
+        # Try live model selection from DynamicModelBrain first.
+        if _DYNAMIC_BRAIN_AVAILABLE:
+            try:
+                _live_cf = best_cf_model_live(task=task)
+                if _live_cf:
+                    logger.debug(
+                        f"[CF-Workers-AI] Dynamic Brain [{task}]: {_live_cf.id} "
+                        f"(score={_live_cf.score})"
+                    )
+                    return _live_cf.id
+            except Exception as exc:
+                logger.debug(f"[CF-Workers-AI] Brain model fetch failed: {exc}")
+        # Fallback: existing CloudflareModelSelector
         try:
             selected = self._selector.best_model(task=task, probe=False)
             logger.debug(f"[CF-Workers-AI] Dynamic model [{task}]: {selected}")
@@ -1747,6 +1808,21 @@ class CloudflareAIGatewayProvider(_BaseProvider):
     def _resolve_model(self, model: Optional[str], task: str) -> str:
         if model:
             return model
+        # ── Dynamic Brain Integration (Fix-16.0) ─────────────────────
+        # Try live model selection from DynamicModelBrain first.
+        # Falls back to existing CloudflareModelSelector on any failure.
+        if _DYNAMIC_BRAIN_AVAILABLE:
+            try:
+                _live_cf = best_cf_model_live(task=task)
+                if _live_cf:
+                    logger.debug(
+                        f"[CF-AI-GW] Dynamic Brain [{task}]: {_live_cf.id} "
+                        f"(score={_live_cf.score})"
+                    )
+                    return _live_cf.id
+            except Exception as exc:
+                logger.debug(f"[CF-AI-GW] Brain model fetch failed: {exc}")
+        # Fallback: existing CloudflareModelSelector
         try:
             selected = self._selector.best_model(task=task, probe=False)
             logger.debug(f"[CF-AI-GW] Dynamic model [{task}]: {selected}")
