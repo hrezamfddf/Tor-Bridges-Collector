@@ -108,7 +108,9 @@ import urllib.error
 from typing import Optional, List, Dict, Any, Tuple
 from .rotator import AccountRotator, AccountSlot, build_rotator_from_env
 from .model_selector import CloudflareModelSelector, best_cf_model
-from .exceptions import ProviderConfigurationError
+from .exceptions import ProviderConfigurationError, BadRequestError
+
+logger = logging.getLogger("torshield.ai.providers")
 
 # ── Dynamic Model Brain Integration (Fix-16.0) ────────────────────────────
 # Live model fetcher + intelligent scorer that replaces hardcoded model IDs
@@ -142,8 +144,6 @@ try:
     _DPI_ADAPTER_AVAILABLE = True
 except ImportError:
     _DPI_ADAPTER_AVAILABLE = False
-
-logger = logging.getLogger("torshield.ai.providers")
 
 # Number of Cloudflare slots
 CF_N_SLOTS = 11
@@ -353,18 +353,7 @@ RETRYABLE_HTTP_CODES   = {429, 500, 502, 503, 504}  # Codes worth retrying
 AUTH_FAILURE_HTTP_CODES = {401, 403}  # NEVER retry these — auth failures won't fix themselves
 
 
-class BadRequestError(Exception):
-    """Raised when provider returns HTTP 400 Bad Request.
-
-    This is a request-level error (wrong model, malformed payload, bad URL path)
-    and is NOT an authentication failure. It should be distinguished from 401/403
-    so the caller can decide to try a different model instead of skipping the slot.
-    """
-
-    def __init__(self, message: str = "", *, provider: str = "", slot: int = 0) -> None:
-        self.provider = provider
-        self.slot = slot
-        super().__init__(message)
+# BadRequestError is now imported from .exceptions — no local duplicate
 
 # ── User-Agent Configuration ──────────────────────────────────────────────────
 # Cloudflare returns "error code: 1010" when no User-Agent is set.

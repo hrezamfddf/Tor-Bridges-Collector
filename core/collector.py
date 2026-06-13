@@ -51,6 +51,13 @@ class BridgeCollector:
             from sources.telegram_bridges import fetch_all as tg_fetch
             tasks.append(asyncio.create_task(tg_fetch(), name="telegram"))
 
+        if config.USE_GITHUB_SOURCES:
+            try:
+                from sources.github_bridges import fetch_all as gh_fetch
+                tasks.append(asyncio.create_task(gh_fetch(), name="github"))
+            except ImportError:
+                log.warning("GitHub bridges source not available (import error)")
+
         gathered: List[List[Tuple[str, str, str]]] = await asyncio.gather(
             *tasks, return_exceptions=True
         )

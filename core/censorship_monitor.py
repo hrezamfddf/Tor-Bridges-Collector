@@ -142,7 +142,7 @@ LEVEL_RECOMMENDATIONS: Dict[int, Dict] = {
         "description": "ML-based traffic analysis. Only high-entropy transports.",
         "best_transports": ["snowflake", "webtunnel", "meek_lite"],
         "avoid":           ["vanilla", "obfs4-port-not-443"],
-        "pack_file":       "export/iran_nin_pack.txt",
+        "pack_file":       "export/iran_cut_pack.txt",
         "urgency":         "high",
     },
     5: {
@@ -150,7 +150,7 @@ LEVEL_RECOMMENDATIONS: Dict[int, Dict] = {
         "description": "شبکه ملی فعال. International cut. CDN-fronted only.",
         "best_transports": ["snowflake", "webtunnel-cdn"],
         "avoid":           ["vanilla", "obfs4", "meek_lite-non-cdn"],
-        "pack_file":       "export/iran_nin_pack.txt",
+        "pack_file":       "export/iran_cut_pack.txt",
         "urgency":         "critical",
     },
 }

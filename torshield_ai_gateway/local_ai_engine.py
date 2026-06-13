@@ -710,6 +710,7 @@ class LocalAIEngine:
         self,
         messages: List[Dict[str, str]],
         task: str = "general",
+        **kwargs,
     ) -> str:
         """
         Gateway-compatible chat completion interface.

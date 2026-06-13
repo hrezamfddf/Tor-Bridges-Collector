@@ -114,6 +114,26 @@ def _parse_args() -> argparse.Namespace:
         "--auto-debug", action="store_true",
         help="Run comprehensive auto-debug diagnosis",
     )
+    p.add_argument(
+        "--utls-status", action="store_true",
+        help="Show uTLS evasion layer status",
+    )
+    p.add_argument(
+        "--circuit-status", action="store_true",
+        help="Show 11-slot circuit breaker status",
+    )
+    p.add_argument(
+        "--registry-status", action="store_true",
+        help="Show elite registry model discovery status",
+    )
+    p.add_argument(
+        "--telemetry-report", action="store_true",
+        help="Generate 24-hour telemetry report",
+    )
+    p.add_argument(
+        "--full-shield", action="store_true",
+        help="Run full shield: anti-DPI + anti-filter + uTLS + circuit breaker check",
+    )
     return p.parse_args()
 
 
@@ -218,6 +238,18 @@ def run_anti_dpi_analysis() -> None:
     tls = dpi.get_tls_randomization()
     log.info(f"TLS profile: {tls['recommended_profile']}")
 
+    # Also run Quantum Shield assessment if available
+    try:
+        from torshield_ai_gateway.iran_quantum_shield import get_quantum_shield
+        shield = get_quantum_shield()
+        assessment = shield.assess_dpi_threat()
+        log.info(f"Quantum Shield: Level={assessment.threat_level.name}, "
+                 f"Score={assessment.threat_score:.2f}, "
+                 f"NIN Probability={assessment.nin_probability:.2f}")
+        log.info(f"Best transports: {', '.join(t.transport_name for t in assessment.best_transports[:3])}")
+    except Exception as e:
+        log.debug(f"Quantum Shield assessment skipped: {e}")
+
 
 def run_anti_filter_analysis() -> None:
     """Run smart anti-filtering analysis for Iran."""
@@ -243,6 +275,148 @@ def run_auto_debug() -> None:
     log.info(f"Overall status: {summary['overall_status']}")
     for rec in report.get('recommendations', []):
         log.info(f"  Recommendation: {rec}")
+
+    # Also run Quantum Shield diagnosis if available
+    try:
+        from torshield_ai_gateway.iran_quantum_shield import get_quantum_shield
+        shield = get_quantum_shield()
+        q_report = shield.run_auto_diagnosis()
+        log.info(f"Quantum Shield Diagnosis: {q_report['overall_status']}")
+        for err in q_report.get('errors', []):
+            log.error(f"  QS Error: {err}")
+        for warn in q_report.get('warnings', []):
+            log.warning(f"  QS Warning: {warn}")
+    except Exception as e:
+        log.debug(f"Quantum Shield diagnosis skipped: {e}")
+
+
+def run_utls_status() -> None:
+    """Show uTLS evasion layer status."""
+    from uTLS_evasion_layer import UTLSManager
+    log.info("━━ uTLS EVASION LAYER STATUS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    manager = UTLSManager()
+    status = manager.get_status()
+    for key, value in status.items():
+        log.info(f"  {key}: {value}")
+
+    # Show SNI masking config
+    sni_config = manager.get_sni_masking_config()
+    log.info(f"  SNI Front: {sni_config['sni_front']} ({sni_config['front_type']})")
+
+    # Show current profile
+    profile = manager.get_randomized_profile()
+    log.info(f"  Active Profile: {profile.name} (JA3: {profile.ja3_hash[:16]}...)")
+
+
+def run_circuit_status() -> None:
+    """Show 11-slot circuit breaker status."""
+    from circuit_breaker_11slot import CircuitBreaker11Slot
+    log.info("━━ 11-SLOT CIRCUIT BREAKER STATUS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    cb = CircuitBreaker11Slot()
+    status = cb.get_status()
+    log.info(f"  Configured: {status['configured_slots']}/{status['total_slots']}")
+    log.info(f"  Available: {status['available_slots']}")
+    log.info(f"  Blacklisted: {status['blacklisted_slots']}")
+    log.info(f"  Circuit Open: {status['circuit_open_slots']}")
+    log.info(f"  Rotation Counter: {status['rotation_counter']}")
+
+    for slot_idx, slot_info in status.get('slots', {}).items():
+        if slot_info['configured']:
+            state = "AVAILABLE" if slot_info['available'] else ("BLACKLISTED" if slot_info['blacklisted'] else "CIRCUIT OPEN")
+            log.info(
+                f"  Slot {slot_idx}: {state} | "
+                f"health={slot_info['health_score']:.3f} | "
+                f"success_rate={slot_info['success_rate']:.3f} | "
+                f"latency={slot_info['avg_latency_ms']:.0f}ms | "
+                f"gateway={'YES' if slot_info['has_gateway'] else 'NO'}"
+            )
+
+
+def run_registry_status() -> None:
+    """Show elite registry model discovery status."""
+    from elite_registry import EliteRegistry
+    log.info("━━ ELITE REGISTRY STATUS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    registry = EliteRegistry()
+    status = registry.get_status()
+    log.info(f"  Total Models: {status['total_models']}")
+    log.info(f"  Available Models: {status['available_models']}")
+    log.info(f"  Last Refresh: {status['last_refresh']}")
+    log.info(f"  Cache Age: {status['cache_age_hours']}h")
+
+    # Show top 5 models
+    log.info("  Top 5 Models (by fitness score):")
+    for i, model in enumerate(status.get('top_5_models', []), 1):
+        log.info(
+            f"    {i}. {model['model_id']} "
+            f"(fitness={model['fitness_score']:.3f}, "
+            f"dpi={model['dpi_resistance_index']:.3f}, "
+            f"latency={model['response_latency']:.3f}, "
+            f"context={model['context_window_utility']:.3f})"
+        )
+
+
+def run_telemetry_report() -> None:
+    """Generate 24-hour telemetry report."""
+    from telemetry_watcher import TelemetryWatcher
+    log.info("━━ 24-HOUR TELEMETRY REPORT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    watcher = TelemetryWatcher()
+    report = watcher.get_24h_summary()
+    log.info(f"  Date: {report.date}")
+    log.info(f"  Total DPI Events: {report.total_dpi_events}")
+    log.info(f"  DPI Blocked: {report.dpi_events_blocked}")
+    log.info(f"  DPI Evaded: {report.dpi_events_evaded}")
+    log.info(f"  Evasion Success Rate: {report.evasion_success_rate:.1%}")
+    log.info(f"  Slot Failures: {report.total_slot_failures}")
+    log.info(f"  Slots Poisoned: {report.slots_poisoned}")
+    log.info(f"  Slots Recovered: {report.slots_recovered}")
+    log.info(f"  Self-Heal Events: {report.total_self_heal_events}")
+    log.info(f"  Failures Recovered: {report.failures_recovered}")
+    log.info(f"  Model Resolution Failures: {report.model_resolution_failures}")
+    log.info(f"  Auto-Debug Triggered: {report.auto_debug_triggered}")
+    log.info(f"  Uptime: {report.uptime_percentage:.1f}%")
+
+    # Also show current status
+    current_status = watcher.get_status()
+    log.info(f"  Current Iran Time: {current_status.get('iran_time', 'N/A')}")
+    log.info(f"  Censorship Intensity: {current_status.get('censorship_intensity', 'N/A')}")
+    log.info(f"  High Censorship Hours: {current_status.get('is_high_censorship_hours', False)}")
+
+
+def run_full_shield() -> None:
+    """Run full shield: all evasion and monitoring systems."""
+    log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    log.info("━━ FULL SHIELD: ALL SYSTEMS CHECK ━━━━━━━━━━━━━━━━━━━━━━━━━")
+    log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+    # 1. Anti-DPI analysis
+    run_anti_dpi_analysis()
+
+    # 2. Anti-filter analysis
+    run_anti_filter_analysis()
+
+    # 3. uTLS status
+    run_utls_status()
+
+    # 4. Circuit breaker status
+    run_circuit_status()
+
+    # 5. Registry status
+    run_registry_status()
+
+    # 6. Telemetry report
+    run_telemetry_report()
+
+    # 7. Auto-debug check
+    from telemetry_watcher import get_telemetry
+    telemetry = get_telemetry()
+    should_debug = telemetry.check_auto_debug()
+    if should_debug:
+        log.info("━━ AUTO-DEBUG TRIGGERED BY TELEMETRY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        run_auto_debug()
+
+    log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    log.info("━━ FULL SHIELD CHECK COMPLETE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -270,6 +444,31 @@ async def main() -> None:
     # ── Auto-debug shortcut ────────────────────────────────────────────────
     if args.auto_debug:
         run_auto_debug()
+        return
+
+    # ── uTLS status shortcut ──────────────────────────────────────────────
+    if args.utls_status:
+        run_utls_status()
+        return
+
+    # ── Circuit breaker status shortcut ───────────────────────────────────
+    if args.circuit_status:
+        run_circuit_status()
+        return
+
+    # ── Elite registry status shortcut ────────────────────────────────────
+    if args.registry_status:
+        run_registry_status()
+        return
+
+    # ── Telemetry report shortcut ─────────────────────────────────────────
+    if args.telemetry_report:
+        run_telemetry_report()
+        return
+
+    # ── Full shield shortcut ──────────────────────────────────────────────
+    if args.full_shield:
+        run_full_shield()
         return
 
     # ── Initialise history ────────────────────────────────────────────────

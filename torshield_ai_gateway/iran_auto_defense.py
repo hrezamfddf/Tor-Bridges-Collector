@@ -291,9 +291,10 @@ class IranAutoDefense:
 
         # Try to use the censorship monitor module
         try:
-            from core.censorship_monitor import CensorshipMonitor
-            monitor = CensorshipMonitor()
-            state = monitor.get_current_state()
+            from core.censorship_monitor import get_last_state, run_sync as _censorship_run_sync
+            state = get_last_state()
+            if state is None:
+                state = _censorship_run_sync(write_state=False)
             threat.censorship_level = getattr(state, "level", 1)
             threat.censorship_confidence = getattr(state, "confidence", 0.5)
             threat.dpi_active = threat.censorship_level >= 4

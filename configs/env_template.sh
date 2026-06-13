@@ -23,8 +23,21 @@ CEREBRAS_API_KEY=""                    # [RECOMMENDED] Cerebras API key
 # AI PROVIDER: Cloudflare Workers AI + AI Gateway
 # ─────────────────────────────────────────────────────────────────────────────
 # Cloudflare provides multiple slots for redundancy and quota multiplication.
-# CF_ACCOUNT_ID is shared across all slots.
-CF_ACCOUNT_ID=""                       # [RECOMMENDED] Cloudflare account ID
+# Each slot has its own CF_ACCOUNT_ID, CF_API_TOKEN, and CF_AI_GATEWAY_URL.
+
+# Account IDs for each Cloudflare slot (1-11)
+# Each slot can have a different account_id for quota multiplication
+CF_ACCOUNT_ID_1=""                      # [RECOMMENDED] Cloudflare account ID slot 1
+CF_ACCOUNT_ID_2=""                      # Cloudflare account ID slot 2
+CF_ACCOUNT_ID_3=""                      # Cloudflare account ID slot 3
+CF_ACCOUNT_ID_4=""                      # Cloudflare account ID slot 4
+CF_ACCOUNT_ID_5=""                      # Cloudflare account ID slot 5
+CF_ACCOUNT_ID_6=""                      # Cloudflare account ID slot 6
+CF_ACCOUNT_ID_7=""                      # Cloudflare account ID slot 7
+CF_ACCOUNT_ID_8=""                      # Cloudflare account ID slot 8
+CF_ACCOUNT_ID_9=""                      # Cloudflare account ID slot 9
+CF_ACCOUNT_ID_10=""                     # Cloudflare account ID slot 10
+CF_ACCOUNT_ID_11=""                     # Cloudflare account ID slot 11
 
 # API tokens for each Cloudflare slot (1-11)
 # At least CF_API_TOKEN_1 should be set for Workers AI access.

@@ -119,7 +119,7 @@ def save_history(history: Dict[str, Any]) -> None:
 
 
 def cleanup_history(history: Dict[str, Any]) -> Dict[str, Any]:
-    cutoff = datetime.now() - timedelta(days=HISTORY_RETENTION_DAYS)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=HISTORY_RETENTION_DAYS)
     stale = []
     for k, v in history.items():
         try:
@@ -254,7 +254,7 @@ def _fetch(session: requests.Session, url: str, transport: str) -> List[str]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _update_readme(stats: Dict[str, int]) -> None:
-    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     content = f"""# Tor Bridges Collector & Archive
 
 Auto-updated every hour. Last update: **{ts}**
@@ -345,7 +345,7 @@ def run() -> Dict[str, int]:
     session = _session()
     history = load_history()
     history = cleanup_history(history)
-    cutoff  = datetime.now() - timedelta(hours=RECENT_HOURS)
+    cutoff  = datetime.now(timezone.utc) - timedelta(hours=RECENT_HOURS)
     stats: Dict[str, int] = {}
 
     for target in TARGETS:
@@ -425,7 +425,7 @@ def run() -> Dict[str, int]:
 
     # README + Telegram
     _update_readme(stats)
-    current_hour = datetime.utcnow().hour
+    current_hour = datetime.now(timezone.utc).hour
     should_upload = (IS_GITHUB and TELEGRAM_UPLOAD) or (IS_GITHUB and current_hour == 0)
     if should_upload:
         zip_path = _make_zip(stats)

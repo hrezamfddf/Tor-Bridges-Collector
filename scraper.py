@@ -610,7 +610,17 @@ def main() -> None:
     github_bridges: List[Tuple[str, str, str]] = []
     if _HAVE_GITHUB:
         try:
-            github_bridges = asyncio.run(fetch_github_async())
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop and loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(1) as ex:
+                    fut = ex.submit(asyncio.run, fetch_github_async())
+                    github_bridges = fut.result(timeout=30)
+            else:
+                github_bridges = asyncio.run(fetch_github_async())
             log.info(f"GitHub bridges: {len(github_bridges)} collected")
         except Exception as e:
             log.warning(f"GitHub bridges failed: {e}")

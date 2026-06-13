@@ -160,12 +160,15 @@ async def fetch_all() -> List[Tuple[str, str, str]]:
 
         all_results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    transport_cycle = _TRANSPORT_TYPES * 2  # interleaved direct + fronted
+    # Build transport labels matching the task order (direct, fronted per transport)
+    transport_labels = []
+    for transport in _TRANSPORT_TYPES:
+        transport_labels.extend([transport, transport])  # direct, fronted
     for i, res in enumerate(all_results):
         if isinstance(res, Exception):
             log.warning("BridgeDB fetch error: %s", res)
             continue
-        transport = transport_cycle[i % len(transport_cycle)]
+        transport = transport_labels[i % len(transport_labels)]
         for line in res:
             if line in seen:
                 continue

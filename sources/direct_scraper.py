@@ -149,7 +149,7 @@ def save_history(history: Dict[str, Any]) -> None:
 
 def cleanup_history(history: Dict[str, Any]) -> Dict[str, Any]:
     """Remove entries older than HISTORY_RETENTION_DAYS."""
-    cutoff = datetime.now() - timedelta(days=HISTORY_RETENTION_DAYS)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=HISTORY_RETENTION_DAYS)
     to_delete: List[str] = []
     for k, v in history.items():
         try:
@@ -366,7 +366,7 @@ def run(bridge_dir: Optional[Path] = None) -> Dict[str, int]:
     history = load_history()
     history = cleanup_history(history)
 
-    recent_cutoff = datetime.now() - timedelta(hours=RECENT_HOURS)
+    recent_cutoff = datetime.now(timezone.utc) - timedelta(hours=RECENT_HOURS)
     stats: Dict[str, int] = {}
 
     for target in TARGETS:

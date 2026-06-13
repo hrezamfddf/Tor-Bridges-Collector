@@ -739,7 +739,7 @@ def detect_iran_dpi_active() -> bool:
         return True
 
     try:
-        from torshield_ai_gateway.iran_intelligence import IranIntelligence
+        from torshield_ai_gateway.iran_intelligence import IranIntelligenceLayer as IranIntelligence
         intel = IranIntelligence()
         if hasattr(intel, 'is_dpi_active') and intel.is_dpi_active:
             return True

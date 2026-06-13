@@ -156,11 +156,10 @@ class IranSmartAntiFilter:
         Uses local knowledge base + optional network probes.
         """
         try:
-            from core.censorship_monitor import CensorshipMonitor
-            monitor = CensorshipMonitor()
-            state = monitor.detect_level()
+            from core.censorship_monitor import measure_censorship_level, run_sync as _censorship_run_sync
+            state = _censorship_run_sync(write_state=True)
             self._state.level = state.level
-            self._state.label = state.label
+            self._state.label = state.recommendations.get("label", "Unknown")
             self._state.confidence = state.confidence
             self._state.nin_active = state.nin_active
             self._state.isp_tier = state.isp_tier

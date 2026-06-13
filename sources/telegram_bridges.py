@@ -21,7 +21,7 @@ import asyncio
 import logging
 import re
 import time
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import aiohttp
 
@@ -64,13 +64,16 @@ _HEADERS = {
 
 
 async def _scrape_channel(
-    session: aiohttp.ClientSession, channel: str
+    session: aiohttp.ClientSession, channel: str, proxy: Optional[str] = None
 ) -> List[str]:
     """Scrape a public Telegram channel preview page for bridge lines."""
     url = _TG_PREVIEW_URL.format(channel=channel)
     bridges: List[str] = []
     try:
-        async with session.get(url, headers=_HEADERS, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+        async with session.get(
+            url, headers=_HEADERS, timeout=aiohttp.ClientTimeout(total=15),
+            proxy=proxy,
+        ) as resp:
             if resp.status != 200:
                 log.warning("Telegram channel @%s: HTTP %d", channel, resp.status)
                 return bridges
@@ -104,12 +107,12 @@ async def fetch_all() -> List[Tuple[str, str, str]]:
     Fetch bridges from all configured public Telegram channels.
     Returns list of (bridge_line, transport, ip_version).
     """
-    proxy = config.HTTP_PROXY or None
+    proxy = config.HTTP_PROXY or config.HTTPS_PROXY or None
     connector = aiohttp.TCPConnector(limit=5)
     results: List[Tuple[str, str, str]] = []
 
     async with aiohttp.ClientSession(connector=connector) as session:
-        tasks = [_scrape_channel(session, ch) for ch in _CHANNELS]
+        tasks = [_scrape_channel(session, ch, proxy) for ch in _CHANNELS]
         channel_results = await asyncio.gather(*tasks, return_exceptions=True)
 
     seen: set = set()

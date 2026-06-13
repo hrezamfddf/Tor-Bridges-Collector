@@ -177,6 +177,106 @@ except ImportError:
     get_dpi_adapter = None  # type: ignore[misc,assignment]
     run_dpi_assessment = None  # type: ignore[misc,assignment]
 
+# Iran Quantum Shield — Ultra-Advanced AI Anti-Filtering & Anti-DPI (graceful)
+try:
+    from .iran_quantum_shield import (
+        IranQuantumShield,
+        DPIPattern,
+        EvasionStrategy as QuantumEvasionStrategy,
+        ThreatLevel as QuantumThreatLevel,
+        TransportType as QuantumTransportType,
+        DPIAssessment as QuantumDPIAssessment,
+        TLSProfile,
+        BridgeScore,
+        get_quantum_shield,
+        run_quantum_assessment,
+        run_quantum_diagnosis,
+        score_bridge_for_iran,
+    )
+except ImportError:
+    IranQuantumShield = None  # type: ignore[misc,assignment]
+    DPIPattern = None  # type: ignore[misc,assignment]
+    QuantumEvasionStrategy = None  # type: ignore[misc,assignment]
+    QuantumThreatLevel = None  # type: ignore[misc,assignment]
+    QuantumTransportType = None  # type: ignore[misc,assignment]
+    QuantumDPIAssessment = None  # type: ignore[misc,assignment]
+    TLSProfile = None  # type: ignore[misc,assignment]
+    BridgeScore = None  # type: ignore[misc,assignment]
+    get_quantum_shield = None  # type: ignore[misc,assignment]
+    run_quantum_assessment = None  # type: ignore[misc,assignment]
+    run_quantum_diagnosis = None  # type: ignore[misc,assignment]
+    score_bridge_for_iran = None  # type: ignore[misc,assignment]
+
+# v4 NEW: uTLS Evasion, Elite Registry, Circuit Breaker, Telemetry
+# (graceful — import errors are non-fatal)
+try:
+    from uTLS_evasion_layer import (
+        UTLSManager,
+        TLSFingerprint,
+        get_utls_manager,
+        get_evasion_headers,
+        get_randomized_profile,
+        is_ultra_stealth_mode,
+    )
+except ImportError:
+    UTLSManager = None  # type: ignore[misc,assignment]
+    TLSFingerprint = None  # type: ignore[misc,assignment]
+    get_utls_manager = None  # type: ignore[misc,assignment]
+    get_evasion_headers = None  # type: ignore[misc,assignment]
+    get_randomized_profile = None  # type: ignore[misc,assignment]
+    is_ultra_stealth_mode = None  # type: ignore[misc,assignment]
+
+try:
+    from elite_registry import (
+        EliteRegistry,
+        ModelEntry,
+        get_registry,
+        get_best_model as registry_get_best_model,
+        get_ranked_models as registry_get_ranked_models,
+    )
+except ImportError:
+    EliteRegistry = None  # type: ignore[misc,assignment]
+    ModelEntry = None  # type: ignore[misc,assignment]
+    get_registry = None  # type: ignore[misc,assignment]
+    registry_get_best_model = None  # type: ignore[misc,assignment]
+    registry_get_ranked_models = None  # type: ignore[misc,assignment]
+
+try:
+    from circuit_breaker_11slot import (
+        CircuitBreaker11Slot,
+        SlotState,
+        get_circuit_breaker,
+        get_next_slot,
+        mark_slot_failed,
+        mark_slot_success,
+    )
+except ImportError:
+    CircuitBreaker11Slot = None  # type: ignore[misc,assignment]
+    SlotState = None  # type: ignore[misc,assignment]
+    get_circuit_breaker = None  # type: ignore[misc,assignment]
+    get_next_slot = None  # type: ignore[misc,assignment]
+    mark_slot_failed = None  # type: ignore[misc,assignment]
+    mark_slot_success = None  # type: ignore[misc,assignment]
+
+try:
+    from telemetry_watcher import (
+        TelemetryWatcher,
+        DailyAggregation,
+        get_telemetry,
+        log_dpi_event,
+        log_slot_failure,
+        log_self_heal,
+        generate_daily_report,
+    )
+except ImportError:
+    TelemetryWatcher = None  # type: ignore[misc,assignment]
+    DailyAggregation = None  # type: ignore[misc,assignment]
+    get_telemetry = None  # type: ignore[misc,assignment]
+    log_dpi_event = None  # type: ignore[misc,assignment]
+    log_slot_failure = None  # type: ignore[misc,assignment]
+    log_self_heal = None  # type: ignore[misc,assignment]
+    generate_daily_report = None  # type: ignore[misc,assignment]
+
 __all__ = [
     "TorShieldAIGateway",
     "get_gateway",
@@ -236,4 +336,45 @@ __all__ = [
     "DPIPatternType",
     "get_dpi_adapter",
     "run_dpi_assessment",
+    # Iran Quantum Shield (v1.0)
+    "IranQuantumShield",
+    "DPIPattern",
+    "QuantumEvasionStrategy",
+    "QuantumThreatLevel",
+    "QuantumTransportType",
+    "QuantumDPIAssessment",
+    "TLSProfile",
+    "BridgeScore",
+    "get_quantum_shield",
+    "run_quantum_assessment",
+    "run_quantum_diagnosis",
+    "score_bridge_for_iran",
+    # v4 NEW: uTLS Evasion Layer
+    "UTLSManager",
+    "TLSFingerprint",
+    "get_utls_manager",
+    "get_evasion_headers",
+    "get_randomized_profile",
+    "is_ultra_stealth_mode",
+    # v4 NEW: Elite Registry
+    "EliteRegistry",
+    "ModelEntry",
+    "get_registry",
+    "registry_get_best_model",
+    "registry_get_ranked_models",
+    # v4 NEW: Circuit Breaker 11-Slot
+    "CircuitBreaker11Slot",
+    "SlotState",
+    "get_circuit_breaker",
+    "get_next_slot",
+    "mark_slot_failed",
+    "mark_slot_success",
+    # v4 NEW: Telemetry Watcher
+    "TelemetryWatcher",
+    "DailyAggregation",
+    "get_telemetry",
+    "log_dpi_event",
+    "log_slot_failure",
+    "log_self_heal",
+    "generate_daily_report",
 ]
