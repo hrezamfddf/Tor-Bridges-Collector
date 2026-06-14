@@ -1,79 +1,175 @@
-Tor-Bridges-Collector — Ultra-Quantum-VIP Edition
-Fix-18.0 / v21.0 — Iran DPI Shield v4.0 + Bug Fixes
-
-KEY CHANGES IN THIS RELEASE:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-BUG FIX 1: dynamic_model_brain.py — CF model fetch returns 0 models
-  ROOT CAUSE: URL used ?task=text-generation&per_page=100 which CF API
-              ignores (wrong task identifier). Returns 0 models always.
-  FIX:       Uses ?per_page=500 (same as model_selector.py which works
-              and returns 25 models). Filters by text-gen task in Python.
-              Also retries with ?per_page=500 (no search) as fallback.
-  RESULT:    Brain fetches 25+ live models from first CF account.
-
-BUG FIX 2: dynamic_model_brain.py — Brain stops on first account
-  ROOT CAUSE: refresh() broke out of loop on ANY successful account,
-              even if it returned 0 models (due to Bug 1 or 403).
-  FIX:       Only breaks when models are actually returned. Logs
-              progress when skipping empty accounts. Falls back to
-              offline model list when ALL accounts return 0 models.
-
-BUG FIX 3: providers.py — CF AI Gateway HTTP 400 on all 11 slots
-  ROOT CAUSE: CF AI Gateway OpenAI-compat endpoint may reject requests
-              depending on gateway version/config. All 6 model IDs
-              with @cf/ prefix failed on all 11 gateway slugs.
-  FIX A:     Also tries model names WITHOUT @cf/ prefix (bare format).
-  FIX B:     After all /v1/chat/completions variants fail, retries with
-              native CF Workers AI URL format:
-              {gateway_base}/workers-ai/@cf/{model_id}
-  FIX C:     Logs actual 400 response body (previously swallowed).
-  FIX D:     Supports CF_AI_GATEWAY_TOKEN_{n} env var for gateway-
-              specific cf-aig-authorization header (some gateways require it).
-  FIX E:     ProviderConfigurationError with diagnostic checklist when
-              all slots/models fail — guides user to fix the root cause.
-
-BUG FIX 4: providers.py — Portkey HTTP 400 on all 3 slots
-  ROOT CAUSE: Portkey API without x-portkey-provider header returns 400
-              because it doesn't know which backend to route to.
-              PORTKEY_PROVIDER_KEY was empty, so no routing header was added.
-  FIX:       Always adds x-portkey-provider: cerebras for Cerebras models.
-              Uses CEREBRAS_API_KEY_1 as backend auth when available.
-              Adds x-portkey-custom-host: https://api.cerebras.ai so
-              Portkey proxies to Cerebras directly.
-              Tries llama3.1-8b first (most reliable Cerebras model).
-
-BUG FIX 5: .github/workflows/ai_gateway_health_check.yml
-  ROOT CAUSE: Pre-flight step only exposed CF_ACCOUNT_ID/TOKEN 1-3 but
-              health check uses all 11 slots. Slots 4-11 had no env vars
-              visible to the pre-flight validation script.
-  FIX:       Pre-flight now exposes all 11 CF_ACCOUNT_ID, CF_API_TOKEN,
-              and CF_AI_GATEWAY_URL variables (1-11).
-              Health check default task changed to 'fast' (was 'general').
-              Health check version echo corrected to v13.0.
-              CEREBRAS_API_KEY_1 passed to health check for Portkey fix.
-
-NEW: torshield_ai_gateway/iran_dpi_shield_v4.py — Iran DPI Shield v4.0
-  AI-powered Deep Packet Inspection countermeasure engine.
-  Components:
-  ├─ JA3FingerprintMutator  — TLS cipher/extension order randomization
-  │  (defeats JA3 hash-based DPI fingerprinting by Iran's SIAM system)
-  ├─ H2FingerprintRandomizer — HTTP/2 header order + SETTINGS randomization
-  │  (defeats H2 fingerprinting used in modern Iran DPI equipment)
-  ├─ TimingJitterEngine     — Inter-packet timing randomization
-  │  (defeats traffic-flow analysis; tuned per-ISP: MCI/Irancell/TCI/etc.)
-  ├─ NINBypassRouter        — NIN/SHOMA backbone detection + bypass routing
-  │  (detects Iran National Internet Network; prefers CF-fronted endpoints)
-  ├─ ThreatAssessorV4       — Real-time DPI threat scoring
-  │  (analyzes: failure rate, latency anomaly, RST patterns, HTTP 421,
-  │   NIN probe, time-of-day weighting → 5-level threat classification)
-  └─ IranDPIShieldV4        — Unified evasion orchestrator (singleton)
-     (produces evasion headers, timing jitter, JA3/H2 profiles, provider
-      recommendations based on real-time threat level)
-
-  ISP-specific profiles: MCI, Irancell, Rightel, TCI, Shatel, NIN, default
-  Threat levels: none → low → medium → high → critical
-  Backward-compatible exports match dynamic_brain_anti_dpi.py interface.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-ZERO DELETIONS: All existing modules/features fully preserved.
+./.github/workflows/ai_bridge_reranker.yml
+./.github/workflows/ai_gateway_health_check.yml
+./.github/workflows/ai_self_healing.yml
+./.github/workflows/torshield-ir.yml
+./README.md
+./README_FA.md
+./adaptive_transport.py
+./ai_anti_dpi_iran.py
+./ai_dpi_mutator.py
+./ai_dpi_quantum_evasion.py
+./anti_ai_dpi.py
+./anti_censorship/__init__.py
+./auto_debug_system.py
+./bridge-probe/Cargo.toml
+./bridge-probe/src/main.rs
+./bridge-probe/src/probe.rs
+./bridge-probe/src/transport.rs
+./cmd/iran_tester/main.go
+./cmd/probe_scheduler/main.go
+./config.py
+./configs/env_template.sh
+./core/__init__.py
+./core/censorship_monitor.py
+./core/collector.py
+./core/dt_utils.py
+./core/formatter.py
+./core/history.py
+./core/iran_detector.py
+./core/iran_dpi_shaper.py
+./core/nin_selector.py
+./core/notifier.py
+./core/scorer.py
+./core/smart_iran_scorer.py
+./core/tester.py
+./data/anti_dpi_v2_state.json
+./data/anti_filter_state.json
+./data/anti_filter_v2_state.json
+./data/dpi_intelligence.json
+./data/iran_auto_defense_state.json
+./diagnostics/__init__.py
+./docs/ADVANCED_TECHNOLOGIES.md
+./docs/ARCHITECTURE.md
+./docs/DEPENDENCY_GRAPH.md
+./docs/DEPLOYMENT_REPORT.md
+./docs/PORTKEY_CEREBRAS_ARCHITECTURE.md
+./dpi_evasion_advanced.py
+./ebpf_blueprint.py
+./ech_fingerprint_evasion.py
+./export/.gitkeep
+./export/bridges_api.json
+./export/iran_cut_pack.txt
+./export/iran_pack.txt
+./gateway/__init__.py
+./go.mod
+./go_tester/go.mod
+./go_tester/main.go
+./install.sh
+./internal/asn/iran_asns.go
+./internal/bridge/parser.go
+./internal/bridge/tester.go
+./internal/ipinfo/client.go
+./internal/ooni/client.go
+./internal/ripe/atlas.go
+./iran_anti_siam.py
+./iran_nin_bypass.py
+./iran_smart_anti_filter.py
+./ja3_intelligence.py
+./main.py
+./ml_predictor.py
+./model_selector/__init__.py
+./monitoring/__init__.py
+./monitoring/health_check.py
+./monitoring/provider_dashboard.py
+./monitoring/structured_logging.py
+./next_gen_transports.py
+./nin_advanced_bypass.py
+./nin_cut_tester.py
+./nin_internet_cut_classifier.py
+./onionhop_collector.py
+./ooni_correlator.py
+./packaging/build_package.sh
+./providers/__init__.py
+./quantum_safe.py
+./quarantine_manager.py
+./reports/FINAL_AUDIT_REPORT.pdf
+./reports/artifact_validation_report.json
+./reports/coverage_html/.gitignore
+./reports/coverage_html/class_index.html
+./reports/coverage_html/coverage_html_cb_dd2e7eb5.js
+./reports/coverage_html/favicon_32_cb_c827f16f.png
+./reports/coverage_html/function_index.html
+./reports/coverage_html/index.html
+./reports/coverage_html/keybd_closed_cb_900cfef5.png
+./reports/coverage_html/status.json
+./reports/coverage_html/style_cb_9ff733b0.css
+./reports/coverage_html/z_57760688d1f824db___init___py.html
+./reports/coverage_html/z_57760688d1f824db_censorship_monitor_py.html
+./reports/coverage_html/z_57760688d1f824db_collector_py.html
+./reports/coverage_html/z_57760688d1f824db_dt_utils_py.html
+./reports/coverage_html/z_57760688d1f824db_formatter_py.html
+./reports/coverage_html/z_57760688d1f824db_history_py.html
+./reports/coverage_html/z_57760688d1f824db_iran_detector_py.html
+./reports/coverage_html/z_57760688d1f824db_iran_dpi_shaper_py.html
+./reports/coverage_html/z_57760688d1f824db_nin_selector_py.html
+./reports/coverage_html/z_57760688d1f824db_notifier_py.html
+./reports/coverage_html/z_57760688d1f824db_scorer_py.html
+./reports/coverage_html/z_57760688d1f824db_smart_iran_scorer_py.html
+./reports/coverage_html/z_57760688d1f824db_tester_py.html
+./reports/coverage_html/z_5d746b4c5dd79dd0___init___py.html
+./reports/coverage_html/z_5d746b4c5dd79dd0_bridgedb_api_py.html
+./reports/coverage_html/z_5d746b4c5dd79dd0_direct_scraper_py.html
+./reports/coverage_html/z_5d746b4c5dd79dd0_github_bridges_py.html
+./reports/coverage_html/z_5d746b4c5dd79dd0_legacy_scraper_py.html
+./reports/coverage_html/z_5d746b4c5dd79dd0_moat_py.html
+./reports/coverage_html/z_5d746b4c5dd79dd0_static_bridges_py.html
+./reports/coverage_html/z_5d746b4c5dd79dd0_telegram_bridges_py.html
+./reports/coverage_html/z_5d746b4c5dd79dd0_torproject_py.html
+./reports/coverage_html/z_c826fb17a8123d0e___init___py.html
+./reports/coverage_html/z_c826fb17a8123d0e_ai_anti_dpi_iran_v2_py.html
+./reports/coverage_html/z_c826fb17a8123d0e_auto_debug_py.html
+./reports/coverage_html/z_c826fb17a8123d0e_gateway_py.html
+./reports/coverage_html/z_c826fb17a8123d0e_iran_auto_defense_py.html
+./reports/coverage_html/z_c826fb17a8123d0e_iran_intelligence_py.html
+./reports/coverage_html/z_c826fb17a8123d0e_iran_smart_anti_filter_v2_py.html
+./reports/coverage_html/z_c826fb17a8123d0e_local_ai_engine_py.html
+./reports/coverage_html/z_c826fb17a8123d0e_model_selector_py.html
+./reports/coverage_html/z_c826fb17a8123d0e_providers_py.html
+./reports/coverage_html/z_c826fb17a8123d0e_rotator_py.html
+./reports/coverage_html/z_c826fb17a8123d0e_smart_bypass_engine_py.html
+./requirements.txt
+./results_writer.py
+./scraper.py
+./scripts/ai_bridge_reranker.py
+./scripts/ai_gateway_health_check.py
+./scripts/generate_architecture_docs.py
+./scripts/generate_dependency_graph.py
+./scripts/generate_deployment_report.py
+./scripts/generate_final_report.py
+./scripts/validate_artifacts.py
+./self_heal.py
+./setup_env.sh
+./sources/__init__.py
+./sources/bridgedb_api.py
+./sources/direct_scraper.py
+./sources/github_bridges.py
+./sources/legacy_scraper.py
+./sources/moat.py
+./sources/static_bridges.py
+./sources/telegram_bridges.py
+./sources/torproject.py
+./tests/__init__.py
+./tests/test_ci_workflows.py
+./tests/test_circuit_breaker.py
+./tests/test_gateway.py
+./tests/test_health_check.py
+./tests/test_iran_modules.py
+./tests/test_model_selector.py
+./tests/test_providers.py
+./torshield_ai_gateway/__init__.py
+./torshield_ai_gateway/ai_anti_dpi_iran_v2.py
+./torshield_ai_gateway/auto_debug.py
+./torshield_ai_gateway/gateway.py
+./torshield_ai_gateway/iran_auto_defense.py
+./torshield_ai_gateway/iran_intelligence.py
+./torshield_ai_gateway/iran_smart_anti_filter_v2.py
+./torshield_ai_gateway/local_ai_engine.py
+./torshield_ai_gateway/model_selector.py
+./torshield_ai_gateway/providers.py
+./torshield_ai_gateway/rotator.py
+./torshield_ai_gateway/smart_bypass_engine.py
+./warp_bootstrap.py
+./xtls_reality_wrapper.py
+./zig-scanner/build.zig
+./zig-scanner/src/main.zig
+./ztunnel_ct_monitor.py

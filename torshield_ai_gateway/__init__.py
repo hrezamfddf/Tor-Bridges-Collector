@@ -1,36 +1,41 @@
 """
-torshield_ai_gateway — v21.0 Ultra-Quantum Edition + Iran DPI Shield v4
+torshield_ai_gateway — v20.0 Ultra-Quantum Edition + Dynamic Brain
 Dynamic multi-provider AI gateway with automatic model selection,
-exponential backoff retry, AI-powered anti-DPI, smart Iran bypass, and auto-defense.
+exponential backoff retry, anti-DPI, smart Iran bypass, and auto-defense.
 
-v21.0 CHANGES (Fix-18.0: Brain URL fix + CF Gateway native fallback + DPI Shield v4):
-  - FIX: dynamic_model_brain.py — removed wrong ?task=text-generation filter
-    that caused ALL 11 CF accounts to return 0 models. Now uses ?per_page=500
-    (same as model_selector.py) with Python-side task filtering. Returns 25+
-    models instead of 0.
-  - FIX: Brain offline fallback — loads _OFFLINE_MODELS from model_selector
-    when all CF accounts return 0 models (e.g. 403 permission issue).
-  - FIX: CF AI Gateway — now tries BOTH OpenAI-compat AND native CF format
-    as fallback when /v1/chat/completions returns 400. Also tries model
-    names with and without @cf/ prefix. Logs actual 400 error body.
-  - FIX: CF AI Gateway — added cf-aig-authorization header support for
-    gateway-specific token (CF_AI_GATEWAY_TOKEN_{n} env var).
-  - FIX: Portkey — added x-portkey-provider: cerebras + x-portkey-custom-host
-    headers so Portkey knows which backend to route to. Previously missing
-    this header caused HTTP 400 on ALL Portkey requests.
-  - FIX: Portkey — uses CEREBRAS_API_KEY_1 as provider key when available,
-    making Portkey work as a Cerebras proxy even without PORTKEY_PROVIDER_KEY.
-  - FIX: GitHub Actions workflow — Pre-flight now validates ALL 11 CF slots
-    (was only validating 3). Also passes CEREBRAS_API_KEY_1 to health check.
-  - NEW: iran_dpi_shield_v4.py — AI-powered Iran DPI Shield v4.0
-    JA3/TLS fingerprint mutation, H2 fingerprint randomization,
-    NIN bypass routing, ISP-specific evasion profiles, timing jitter engine,
-    real-time threat assessment with adaptive provider selection.
-  - ZERO DELETIONS: All v1–v3 modules fully preserved.
+v20.0 CHANGES (Fix-16.0: Dynamic Model Brain):
+  - NEW: dynamic_model_brain.py — Live model fetcher + intelligent scorer
+    Fetches models from all 11 CF accounts + Portkey APIs concurrently.
+    Scores models automatically (params, capabilities, context, recency).
+    Replaces hardcoded model IDs with live, scored, dynamic ranking.
+    Falls back to existing model_selector.py on any failure.
+  - NEW: dynamic_brain_anti_dpi.py — AI-powered anti-DPI integration
+    Detects Iran DPI threat level using multiple signal sources.
+    Automatically adjusts model selection for anti-DPI stealth.
+    Prefers CF-hosted models when DPI is active.
+    Limits response sizes to reduce traffic analysis surface.
+  - INTEGRATED: All providers now try Dynamic Brain first,
+    falling back to existing model_selector on any error.
+  - INTEGRATED: Health check Step 0 refreshes brain before checks.
+  - INTEGRATED: CI workflow uses live model ranking step.
+  - ZERO DELETIONS: All existing modules, functions, classes preserved.
+
+v18.0 CHANGES (Correction 7: URL Path + Response Parser + Config Errors):
+  - CF AI Gateway URL uses OpenAI-compatible endpoint:
+    {gateway_base}/workers-ai/v1/chat/completions with model in request body
+  - CF Workers AI direct URL uses OpenAI-compatible endpoint:
+    https://api.cloudflare.com/client/v4/accounts/{acct}/ai/v1/chat/completions
+  - _extract_text() NEVER returns str(response) — always extracts content properly
+  - ProviderConfigurationError for permanent config failures (no retry)
+  - _dead_slots with threading.Lock for thread-safe dead slot tracking
+  - CF slot 400+empty-body → dead-listed, ONE warning per slot
+  - Health check max_tokens=100, prompt tightened
+  - Portkey key validation: prefix check removed, length-only check (>=16 chars)
+  - BadRequestError for HTTP 400 — separated from auth failures
+  - normalize_cf_gateway_url() auto-fixes bare gateway URLs
+  - Circuit breaker threshold raised to max(n_slots, 20)
+  - Health check max_tokens=256, prompt simplified
 """
-from .gateway import TorShieldAIGateway, get_gateway
-from .exceptions import ProviderConfigurationError, BadRequestError
-
 from .gateway import TorShieldAIGateway, get_gateway
 from .exceptions import ProviderConfigurationError, BadRequestError
 from .model_selector import (

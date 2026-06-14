@@ -25,10 +25,10 @@ PRESERVED from v12.0:
   11. Fallback counter tracks how often LocalAIEngine is used
   12. Health check can distinguish primary_ok from degraded
 
-Provider waterfall priority (fastest first, most reliable last):
-  1. Cerebras        — 2100 tokens/sec
-  2. CF-AI-Gateway   — cached, 11x quota via gateway URLs
-  3. CF-Workers-AI   — direct, no caching
+Provider waterfall priority (11x quota first, then fastest):
+  1. CF-AI-Gateway   — cached, 11x quota via gateway URLs (NOW FIXED: /compat/ path)
+  2. CF-Workers-AI   — direct, no caching
+  3. Cerebras        — 2100 tokens/sec
   4. Portkey         — meta-router fallback
   5. LocalAIEngine   — zero-dependency rule-based fallback (ALWAYS available)
      ⚠ LocalAIEngine is DEGRADED mode, NOT a primary provider
@@ -53,9 +53,9 @@ _GATEWAY_INSTANCE: Optional["TorShieldAIGateway"] = None
 
 class TorShieldAIGateway:
     PROVIDER_PRIORITY = [
-        "cerebras",
         "cloudflare_ai_gateway",
         "cloudflare_workers_ai",
+        "cerebras",
         "portkey",
     ]
 

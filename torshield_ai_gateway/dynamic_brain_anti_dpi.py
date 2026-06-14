@@ -497,25 +497,3 @@ if __name__ == "__main__":
 
     print("\n=== Adapter Summary ===")
     print(json.dumps(adapter.summary(), indent=2, default=str))
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FIX-18.0: Iran DPI Shield v4 integration
-# ─────────────────────────────────────────────────────────────────────────────
-
-def get_shield_v4():
-    """Get IranDPIShieldV4 singleton — v4 advanced evasion engine."""
-    try:
-        from .iran_dpi_shield_v4 import IranDPIShieldV4
-        return IranDPIShieldV4.instance()
-    except Exception as exc:
-        logger.debug(f"[AntiDPI] Shield v4 not available: {exc}")
-        return None
-
-
-def run_dpi_assessment_v4():
-    """Run v4 threat assessment with JA3, H2, NIN, and timing analysis."""
-    shield = get_shield_v4()
-    if shield:
-        return shield.assess()
-    return run_dpi_assessment()  # fallback to v1
