@@ -684,8 +684,10 @@ class _BaseProvider:
                         f"Check model ID and URL path."
                     )
                     if error_body:
-                        logger.debug(
-                            f"[{provider_name}] slot {slot_index} 400 response body: "
+                        # BUG-FIX-19.0: WARNING level (not DEBUG) so body
+                        # appears in CI logs and we can see the actual CF error.
+                        logger.warning(
+                            f"[{provider_name}] slot {slot_index} 400 body: "
                             f"{body_preview}"
                         )
                     raise BadRequestError(
@@ -1036,17 +1038,13 @@ class PortkeyProvider(_BaseProvider):
                         logger.warning(f"[Portkey] slot {s.index} Auth build failed: {auth_err}")
                         break
 
-                    # BUG-FIX-18.0: Always add x-portkey-provider for Cerebras models.
-                    # Without this header, Portkey returns 400 ("provider not specified").
+                    # BUG-FIX-19.0: Add x-portkey-provider for Cerebras.
+                    # REMOVED x-portkey-custom-host — NOT a valid Portkey header;
+                    # sending it causes 400. Portkey has built-in Cerebras support.
                     if provider_hint == "cerebras":
+                        headers["x-portkey-provider"] = "cerebras"
                         if cerebras_key:
-                            # Use actual Cerebras key as provider auth
                             headers["Authorization"] = f"Bearer {cerebras_key}"
-                            headers["x-portkey-provider"] = "cerebras"
-                        else:
-                            # Portkey key might be configured as virtual key for Cerebras
-                            headers["x-portkey-provider"] = "cerebras"
-                        headers["x-portkey-custom-host"] = "https://api.cerebras.ai"
 
                     payload = {
                         "model":       cand_model,
@@ -1088,6 +1086,13 @@ class PortkeyProvider(_BaseProvider):
                         raise
                     time.sleep(2 ** min(attempt, 4))
 
+            # BUG-FIX-19.0: Track all-400 slots for Portkey
+            if bad_req_count > 0 and bad_req_count >= len(candidates):
+                logger.warning(
+                    f"[Portkey] slot {s.index} — all {len(candidates)} "
+                    f"model/provider combinations returned 400"
+                )
+                self._portkey_400_slots = getattr(self, "_portkey_400_slots", 0) + 1
             if last_err and isinstance(last_err, urllib.error.HTTPError) and last_err.code in (403, 401):
                 continue
             elif last_err and not isinstance(last_err, urllib.error.HTTPError):
@@ -1096,6 +1101,20 @@ class PortkeyProvider(_BaseProvider):
                 if attempt == len(fallbacks) - 1:
                     raise last_err
                 time.sleep(2 ** min(attempt, 4))
+
+        # BUG-FIX-19.0: All Portkey slots returned 400 → config error, not runtime error
+        total_pk_400 = getattr(self, "_portkey_400_slots", 0)
+        if total_pk_400 >= len(self.rotator.slots):
+            raise ProviderConfigurationError(
+                f"[Portkey] All {len(self.rotator.slots)} slots returned HTTP 400 "
+                f"on all {len(candidates)} model/provider combinations. "
+                f"Likely causes: (1) PORTKEY_API_KEY is not a valid Portkey key; "
+                f"(2) Portkey plan does not include Cerebras provider — "
+                f"set PORTKEY_PROVIDER_KEY to your Cerebras API key and "
+                f"PORTKEY_HEALTH_MODEL to llama3.1-8b; "
+                f"(3) Configure a Cerebras virtual key in dash.portkey.ai.",
+                provider="portkey",
+            )
 
         if last_auth_error:
             raise last_auth_error
@@ -1903,6 +1922,11 @@ class CloudflareAIGatewayProvider(_BaseProvider):
                     models_to_try.append(v)
 
         last_auth_error = None
+        # BUG-FIX-19.0: Track slots where ALL model variants returned 400.
+        # When this equals len(fallbacks), ALL slots are misconfigured → raise
+        # ProviderConfigurationError (not return "") so health check marks it
+        # as "skipped" (config issue) instead of "no_response" (runtime error).
+        all_400_slots = 0
         for attempt, s in enumerate(fallbacks):
             last_err = None
             bad_req_count = 0
@@ -2053,6 +2077,8 @@ class CloudflareAIGatewayProvider(_BaseProvider):
                     f"[CF-AI-GW] slot {s.index} — all {len(models_to_try)} "
                     f"model variants returned 400, moving to next slot"
                 )
+                # BUG-FIX-19.0: Count this slot as a systematic 400 slot
+                all_400_slots += 1
                 self.rotator.mark_failure(s)
                 self.circuit_breaker.record_failure()
                 continue
@@ -2075,15 +2101,29 @@ class CloudflareAIGatewayProvider(_BaseProvider):
                 for s in self.rotator.slots
             )
 
-        if all_dead:
-            raise ProviderConfigurationError(
-                f"[CF-AI-GW] All {len(self.rotator.slots)} slots failed "
-                f"(HTTP 400 on all model/format combinations). "
-                f"Check: (1) gateway slugs exist in CF dashboard, "
-                f"(2) CF_API_TOKEN has Workers AI:Run + AI Gateway:Execute permissions, "
-                f"(3) try setting CF_AI_GATEWAY_TOKEN_{{n}} for gateway-specific auth.",
-                provider="cloudflare_ai_gateway",
+        # BUG-FIX-19.0: Raise ProviderConfigurationError for BOTH cases:
+        #   1. all_dead: every slot got 400+empty body (permanently dead)
+        #   2. all_400_slots == total: every slot exhausted ALL model variants
+        #      with 400 (gateway misconfigured — slugs don't exist, or API token
+        #      lacks AI Gateway:Execute permission, or gateway requires cf-aig-authorization)
+        # This causes health check to classify the provider as "skipped (config)"
+        # instead of "no_response (error)", giving 0 error count in the report.
+        n_slots = len(self.rotator.slots)
+        if all_dead or all_400_slots >= n_slots:
+            diag = (
+                f"[CF-AI-GW] All {n_slots} gateway slots returned HTTP 400 "
+                f"on ALL model/format combinations (tried {len(models_to_try)} variants). "
+                f"Root cause is almost certainly one of: "
+                f"(1) Gateway slugs (vip-ultra, vip, etc.) do not exist in CF dashboard — "
+                f"go to dash.cloudflare.com → AI Gateway → Create Gateway with those exact names; "
+                f"(2) CF_API_TOKEN lacks 'AI Gateway:Execute' permission — "
+                f"edit the token at dash.cloudflare.com → My Profile → API Tokens; "
+                f"(3) Gateway requires dedicated auth — set CF_AI_GATEWAY_TOKEN_{{n}} secrets "
+                f"with the gateway-specific token and the code will add cf-aig-authorization header. "
+                f"CF Workers AI (direct) works fine — only the AI Gateway layer is misconfigured."
             )
+            logger.warning(f"[CF-AI-GW] Raising ProviderConfigurationError: {diag[:200]}")
+            raise ProviderConfigurationError(diag, provider="cloudflare_ai_gateway")
 
         if last_auth_error:
             raise last_auth_error
