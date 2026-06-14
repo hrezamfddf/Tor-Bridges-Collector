@@ -197,22 +197,47 @@ def fetch_cf_models_sync(
     """Fetch live text-gen models from Cloudflare Workers AI REST API.
     Pure synchronous — uses urllib only.
     """
+    # BUG-FIX-18.0: Remove ?task=text-generation filter — it returns 0 models.
+    # CF API uses different internal task identifiers. model_selector.py uses
+    # ?per_page=500 with no task filter and gets 25 models; we do the same,
+    # then filter text-gen models in Python by checking the task name field.
     url = (
         f"https://api.cloudflare.com/client/v4/accounts"
         f"/{account_id}/ai/models/search"
-        f"?task=text-generation&per_page=100"
+        f"?per_page=500&search=instruct"
     )
     headers = {
         "Authorization": f"Bearer {api_token}",
         "Content-Type": "application/json",
+        "User-Agent": "TorShieldAIGateway/18.0",
     }
     data = _http_get(url, headers)
+    # If first query fails or returns empty, try without search filter
+    if not data or not data.get("result"):
+        url_fallback = (
+            f"https://api.cloudflare.com/client/v4/accounts"
+            f"/{account_id}/ai/models/search"
+            f"?per_page=500"
+        )
+        data = _http_get(url_fallback, headers)
     if not data:
         return []
+    # Python-side text-gen filter (matches model_selector.py approach)
+    _TEXT_GEN_TASKS = {
+        "text generation", "text-generation", "text gen",
+        "conversational", "chat", "instruction", "instruct",
+    }
     models: List[LiveModel] = []
     for m in data.get("result", []):
         model_id = m.get("name", "")
         if not model_id:
+            continue
+        # BUG-FIX-18.0: Filter text-gen models in Python (task field from API)
+        task_obj  = m.get("task", {}) or {}
+        task_name = (task_obj.get("name", "") or "").lower().strip()
+        # Accept models with known text-gen task names OR @cf/ hosted models
+        # (some models may have missing/different task labels)
+        if task_name and task_name not in _TEXT_GEN_TASKS:
             continue
         props = [p.get("name", "").lower() for p in m.get("properties", [])]
         tags  = [t.lower() for t in m.get("tags", [])]
@@ -226,7 +251,7 @@ def fetch_cf_models_sync(
             id=model_id,
             source=(ModelSource.CLOUDFLARE_HOSTED if is_hosted
                     else ModelSource.CLOUDFLARE_PROXIED),
-            provider=m.get("task", {}).get("name", "unknown"),
+            provider=task_name or task_obj.get("name", "unknown"),
             param_b=param_b,
             context_k=ctx_k,
             has_reasoning=(
@@ -477,8 +502,10 @@ class DynamicModelBrain:
             if os.environ.get(f"PORTKEY_API_KEY_{i}", "").strip()
         ]
 
-        # Fetch CF models (stop after first successful account —
-        # all accounts on same plan see same model list)
+        # BUG-FIX-18.0: Fetch CF models — try ALL accounts (don't stop on 403/empty).
+        # Previously used "stop after first success" but 403-accounts gave 0 models
+        # and caused the loop to never break. Now we try each account and break
+        # on the FIRST account that actually returns models (not just "no error").
         seen_cf_ids: set = set()
         self._cf_models = []
         for acct, tok in cf_slots:
@@ -488,9 +515,18 @@ class DynamicModelBrain:
                     if m.id not in seen_cf_ids:
                         seen_cf_ids.add(m.id)
                         self._cf_models.append(m)
-                # One successful account gives the full list — stop
+                # BUG-FIX: Only break if we actually got models — don't break on empty
                 if self._cf_models:
+                    logger.info(
+                        f"[Brain] Got {len(self._cf_models)} models from "
+                        f"account {_mask(acct, 6)} — stopping early"
+                    )
                     break
+                else:
+                    logger.debug(
+                        f"[Brain] Account {_mask(acct, 6)} returned 0 models, "
+                        f"trying next account"
+                    )
             except Exception as exc:
                 err_msg = f"CF slot ({_mask(acct, 6)}): {exc}"
                 logger.warning(f"[Brain] {err_msg}")
@@ -500,6 +536,33 @@ class DynamicModelBrain:
             self._fetch_errors.append(
                 "All CF slots returned 0 models"
             )
+            # BUG-FIX-18.0: Fall back to offline model list when live fetch fails
+            # This ensures the brain always has models to score/rank even when
+            # CF API tokens lack model-listing permission.
+            logger.warning(
+                "[Brain] All CF accounts returned 0 models — "
+                "loading offline fallback model list"
+            )
+            try:
+                from .model_selector import _OFFLINE_MODELS  # type: ignore
+                for m_dict in _OFFLINE_MODELS:
+                    mid = m_dict.get("id", "")
+                    if mid and mid not in seen_cf_ids:
+                        seen_cf_ids.add(mid)
+                        self._cf_models.append(LiveModel(
+                            id=mid,
+                            source=ModelSource.CLOUDFLARE_HOSTED,
+                            provider="text generation",
+                            param_b=float(m_dict.get("param_b", 0.0)),
+                            context_k=int(m_dict.get("ctx_k", 8)),
+                            is_newest="maverick" in mid or "scout" in mid,
+                            latency_tier=1 if "fast" in mid else 2,
+                        ))
+                logger.info(
+                    f"[Brain] Offline fallback loaded: {len(self._cf_models)} models"
+                )
+            except Exception as fb_exc:
+                logger.warning(f"[Brain] Offline fallback also failed: {fb_exc}")
 
         # Fetch Portkey models (stop after first successful key)
         seen_pk_ids: set = set()

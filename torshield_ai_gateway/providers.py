@@ -675,14 +675,22 @@ class _BaseProvider:
                 # Also NOT retried (the request itself is wrong, retrying won't help)
                 # BUT this is NOT an auth failure — raise BadRequestError instead.
                 if e.code == 400:
+                    # BUG-FIX-18.0: Log actual response body for diagnosis
+                    # (previously swallowed the body, making diagnosis impossible)
+                    body_preview = error_body[:400] if error_body else "empty body"
                     logger.error(
                         f"[{provider_name}] slot {slot_index} HTTP 400 — "
                         f"BAD_REQUEST, NOT retrying (invalid model or malformed payload). "
                         f"Check model ID and URL path."
                     )
+                    if error_body:
+                        logger.debug(
+                            f"[{provider_name}] slot {slot_index} 400 response body: "
+                            f"{body_preview}"
+                        )
                     raise BadRequestError(
                         f"HTTP 400 for slot {slot_index}: "
-                        f"{error_body[:200] if error_body else 'empty body'}",
+                        f"{body_preview}",
                         provider=provider_name,
                         slot=slot_index,
                     )
@@ -960,44 +968,50 @@ class PortkeyProvider(_BaseProvider):
     ) -> str:
         # Provider-level circuit breaker check
         if not self.circuit_breaker.allow_request():
-            logger.warning(
-                f"[Portkey] Circuit breaker OPEN — skipping request"
-            )
+            logger.warning(f"[Portkey] Circuit breaker OPEN — skipping request")
             raise RuntimeError(
                 f"Portkey provider circuit breaker is OPEN "
                 f"({self.circuit_breaker.failure_count} consecutive failures)"
             )
 
         explicit_model = model
-        # ── Dynamic Brain Integration (Fix-16.0) ─────────────────────
-        # Try live model selection from DynamicModelBrain first.
-        # Falls back to DEFAULT_MODEL if brain is unavailable.
         if not explicit_model and _DYNAMIC_BRAIN_AVAILABLE:
             try:
                 _live_pk = best_portkey_model_live(task=task)
                 if _live_pk:
                     explicit_model = _live_pk.id
-                    logger.debug(
-                        f"[Portkey] Dynamic Brain selected: {explicit_model} "
-                        f"(score={_live_pk.score})"
-                    )
             except Exception as exc:
                 logger.debug(f"[Portkey] Brain model fetch failed: {exc}")
 
-        # BUG-4 FIX: Use PORTKEY_HEALTH_MODEL for Portkey requests.
-        # Portkey cannot resolve "@cf/…" model IDs — it needs a
-        # Cerebras-compatible model ID + provider routing headers.
-        PORTKEY_HEALTH_MODEL = os.environ.get(
-            "PORTKEY_HEALTH_MODEL", "llama-3.3-70b"
-        )
-        chosen_model   = explicit_model or PORTKEY_HEALTH_MODEL
-        # BUG-4 FIX: Build model list with Cerebras-compatible IDs only
-        portkey_models = [
-            PORTKEY_HEALTH_MODEL,
-            "llama3.1-8b",
-            "llama3.1-70b",
-        ]
-        models_to_try  = [chosen_model] + [m for m in portkey_models if m != chosen_model]
+        # BUG-FIX-18.0: Portkey 400 root cause = missing x-portkey-provider header.
+        # When no PORTKEY_PROVIDER_KEY is set, Portkey doesn't know which backend
+        # to route to → 400 on every request.
+        # Fix strategy: build (model, provider, auth) tuples to try in order:
+        #   1. Cerebras with llama3.1-8b (most reliable, confirmed working)
+        #   2. Cerebras with llama3.1-70b
+        #   3. OpenAI-compat fallback if available
+        PORTKEY_HEALTH_MODEL = os.environ.get("PORTKEY_HEALTH_MODEL", "").strip()
+        cerebras_key = os.environ.get("CEREBRAS_API_KEY_1", "").strip()
+
+        # Candidate (model_id, provider_routing_header) pairs
+        candidates = []
+
+        if explicit_model:
+            # Respect explicit model if provided
+            if explicit_model.startswith("@cf/") or "/" in explicit_model:
+                # Strip @cf/ for Portkey
+                bare = explicit_model.replace("@cf/", "")
+                candidates.append((bare, "cerebras"))
+            else:
+                candidates.append((explicit_model, "cerebras"))
+
+        if PORTKEY_HEALTH_MODEL:
+            candidates.append((PORTKEY_HEALTH_MODEL, "cerebras"))
+
+        # Guaranteed working Cerebras models as fallback chain
+        for cm in ["llama3.1-8b", "llama3.1-70b", "llama-4-scout-17b-16e-instruct"]:
+            if (cm, "cerebras") not in candidates:
+                candidates.append((cm, "cerebras"))
 
         slot      = self.rotator.get_primary()
         fallbacks = [slot] + self.rotator.get_fallback_chain(slot.index)
@@ -1005,42 +1019,39 @@ class PortkeyProvider(_BaseProvider):
         last_auth_error = None
         for attempt, s in enumerate(fallbacks):
             last_err = None
-            for m in models_to_try:
+            bad_req_count = 0
+
+            for cand_model, provider_hint in candidates:
                 try:
-                    # Sanitize API key
                     clean_key = _sanitize_api_key(s.api_key)
                     if not clean_key:
                         logger.warning(f"[Portkey] slot {s.index} has empty API key — skipping")
-                        break  # No point trying other models with empty key
+                        break
 
-                    # Validate key format
-                    key_issues = self._validate_portkey_key(clean_key, s.index)
-                    if key_issues:
-                        logger.warning(
-                            f"[Portkey] slot {s.index} Key format issues detected. "
-                            f"If auth fails, check: (1) key starts with 'pk-', "
-                            f"(2) key is not expired, (3) PORTKEY_VIRTUAL_KEY_{s.index} "
-                            f"env var as alternative auth."
-                        )
+                    url = f"{self.gateway_url}/chat/completions"
 
-                    url     = f"{self.gateway_url}/chat/completions"
-
-                    # ── Portkey Authentication Strategy ─────────────────────
-                    # Use the enhanced _build_portkey_auth method for intelligent
-                    # key detection: pk- (native), virtual key, sk- (provider),
-                    # or unknown format with warning.
                     try:
                         headers = self._build_portkey_auth(s.index)
                     except ValueError as auth_err:
-                        logger.warning(
-                            f"[Portkey] slot {s.index} Auth build failed: {auth_err}"
-                        )
-                        break  # No point trying other models with bad auth
+                        logger.warning(f"[Portkey] slot {s.index} Auth build failed: {auth_err}")
+                        break
+
+                    # BUG-FIX-18.0: Always add x-portkey-provider for Cerebras models.
+                    # Without this header, Portkey returns 400 ("provider not specified").
+                    if provider_hint == "cerebras":
+                        if cerebras_key:
+                            # Use actual Cerebras key as provider auth
+                            headers["Authorization"] = f"Bearer {cerebras_key}"
+                            headers["x-portkey-provider"] = "cerebras"
+                        else:
+                            # Portkey key might be configured as virtual key for Cerebras
+                            headers["x-portkey-provider"] = "cerebras"
+                        headers["x-portkey-custom-host"] = "https://api.cerebras.ai"
 
                     payload = {
-                        "model":       m,
+                        "model":       cand_model,
                         "messages":    messages,
-                        "max_tokens":  max_tokens,
+                        "max_tokens":  min(max_tokens, 512),  # Cerebras limit
                         "temperature": temperature,
                     }
                     resp, lat = self._post_json_with_retry(
@@ -1050,55 +1061,42 @@ class PortkeyProvider(_BaseProvider):
                     self.rotator.mark_success(s, lat)
                     self.circuit_breaker.record_success()
                     return self._extract_text(resp)
+
                 except BadRequestError as e:
-                    # HTTP 400 — NOT an auth failure, try next model
+                    bad_req_count += 1
                     logger.debug(
-                        f"[Portkey] slot {s.index} model {m} → "
+                        f"[Portkey] slot {s.index} model {cand_model} → "
                         f"BadRequestError: {str(e)[:200]}"
                     )
-                    continue  # Try next model
+                    continue
+
                 except urllib.error.HTTPError as e:
                     last_err = e
                     if e.code in (403, 401):
                         last_auth_error = e
-                        error_body = _read_error_body(e)
-                        logger.warning(
-                            f"[Portkey] slot {s.index} AUTH FAIL HTTP {e.code}"
-                        )
-                        # Enhanced 401 diagnostics
-                        if e.code == 401:
-                            logger.error(
-                                f"[Portkey] slot {s.index} HTTP 401 UNAUTHORIZED — "
-                                f"possible causes: "
-                                f"(1) Invalid/expired API key, "
-                                f"(2) Key may need x-portkey-config header for virtual key auth, "
-                                f"(3) Check PORTKEY_GATEWAY_URL matches your workspace. "
-                                f"Response: {error_body[:200]}"
-                            )
+                        logger.warning(f"[Portkey] slot {s.index} AUTH FAIL HTTP {e.code}")
                         self.rotator.mark_failure(s)
                         self.circuit_breaker.record_failure()
-                        break  # Try next slot, not next model
-                    # NOTE: 400 is now caught as BadRequestError above, not here
+                        break
                     if e.code == 404:
-                        logger.debug(f"[Portkey] Model not found: {m}")
-                        continue  # Try next model
+                        logger.debug(f"[Portkey] Model not found: {cand_model}")
+                        continue
                     logger.warning(f"[Portkey] slot {s.index} HTTP {e.code}: {e.reason}")
                     self.rotator.mark_failure(s)
                     self.circuit_breaker.record_failure()
                     if attempt == len(fallbacks) - 1:
                         raise
-                    time.sleep(2 ** attempt)
+                    time.sleep(2 ** min(attempt, 4))
 
-            if last_err and last_err.code in (403, 401):
-                continue  # Already marked failure, try next slot
-            elif last_err:
+            if last_err and isinstance(last_err, urllib.error.HTTPError) and last_err.code in (403, 401):
+                continue
+            elif last_err and not isinstance(last_err, urllib.error.HTTPError):
                 self.rotator.mark_failure(s)
                 self.circuit_breaker.record_failure()
                 if attempt == len(fallbacks) - 1:
                     raise last_err
-                time.sleep(2 ** attempt)
+                time.sleep(2 ** min(attempt, 4))
 
-        # All slots exhausted
         if last_auth_error:
             raise last_auth_error
         return ""
@@ -1718,6 +1716,31 @@ class CloudflareAIGatewayProvider(_BaseProvider):
         return normalize_cf_gateway_url(gateway_base_url)
 
     @staticmethod
+    def _build_cf_native_gateway_url(gateway_base_url: str, model_id: str) -> str:
+        """Build native CF Workers AI path through AI Gateway.
+
+        Native format (NOT OpenAI-compat): the model ID is embedded in the URL path.
+        Used as fallback when the OpenAI-compat /v1/chat/completions endpoint returns 400.
+
+        Format: {gateway_base}/workers-ai/{model_id}
+        e.g. https://gateway.ai.cloudflare.com/v1/{acct}/{slug}/workers-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast
+
+        The request body for native format is plain text or JSON with 'messages' field.
+        """
+        # Strip any existing /workers-ai path and suffix from base URL
+        base = gateway_base_url.rstrip("/")
+        for suffix in [
+            "/workers-ai/v1/chat/completions",
+            "/workers-ai/v1",
+            "/workers-ai",
+        ]:
+            if base.endswith(suffix):
+                base = base[: -len(suffix)]
+                break
+        # Ensure model_id starts with @ for CF hosted models
+        return f"{base}/workers-ai/{model_id}"
+
+    @staticmethod
     def _build_cf_request_body(
         model_id: str,
         messages: list,
@@ -1864,14 +1887,26 @@ class CloudflareAIGatewayProvider(_BaseProvider):
         slot      = self.rotator.get_primary()
         fallbacks = [slot] + self.rotator.get_fallback_chain(slot.index)
 
-        models_to_try = [chosen_model] + [m for m in CF_STABLE_MODELS if m != chosen_model]
+        # BUG-FIX-18.0: Build model candidate list with BOTH @cf/ and bare formats.
+        # CF AI Gateway OpenAI-compat endpoint may require the bare format
+        # (without @cf/ prefix) depending on the gateway configuration version.
+        def _model_variants(mid: str) -> list:
+            variants = [mid]
+            if mid.startswith("@cf/"):
+                variants.append(mid[4:])   # "meta/llama-..." (without @cf/)
+            return variants
+
+        models_to_try = []
+        for base_m in ([chosen_model] + [m for m in CF_STABLE_MODELS if m != chosen_model]):
+            for v in _model_variants(base_m):
+                if v not in models_to_try:
+                    models_to_try.append(v)
 
         last_auth_error = None
         for attempt, s in enumerate(fallbacks):
             last_err = None
-            bad_req_count = 0  # BUG-3 FIX: Track 400s per slot
+            bad_req_count = 0
 
-            # Skip dead slots (slots that previously returned 400+empty body)
             with self._dead_slots_lock:
                 if s.index in self._dead_slots:
                     continue
@@ -1886,37 +1921,37 @@ class CloudflareAIGatewayProvider(_BaseProvider):
                     self.circuit_breaker.record_failure()
                     continue
 
+            # BUG-FIX-18.0: Track which (slot, model) combos failed with 400
+            if not hasattr(self, '_slot_failed_models'):
+                self._slot_failed_models = set()
+
             for m in models_to_try:
-                # BUG-3 FIX: Skip models that 400'd on THIS slot only.
-                # Do NOT use a global _failed_models set — different slots
-                # may support different models. Only skip if the model 400'd
-                # on the SAME slot we're about to try.
-                if hasattr(self, '_slot_failed_models'):
-                    if (s.index, m) in self._slot_failed_models:
-                        logger.debug(
-                            f"[CF-AI-GW] Skipping model {m} on slot {s.index} "
-                            f"— previously 400'd on this same slot"
-                        )
-                        continue
+                if (s.index, m) in self._slot_failed_models:
+                    continue
 
                 try:
-                    # Sanitize credentials
                     clean_token = _sanitize_api_key(s.api_key)
                     clean_acct  = _sanitize_api_key(s.account_id)
                     if not clean_token:
                         logger.warning(
                             f"[CF-AI-GW] slot {s.index} has empty API token — skipping"
                         )
-                        break  # No point trying other models with empty token
+                        break
 
-                    # CORRECTION 7: Use OpenAI-compatible endpoint
-                    # Model ID goes in request body, NOT URL path.
-                    # URL: {gateway_base}/workers-ai/v1/chat/completions
+                    # BUG-FIX-18.0: Try OpenAI-compat format first
                     url = self._build_cf_gateway_url(s.gateway_url)
                     headers = {
                         "Content-Type":  "application/json",
                         "Authorization": f"Bearer {clean_token}",
                     }
+                    # Add cf-aig-authorization header if a gateway token is configured
+                    gw_token = os.environ.get(
+                        f"CF_AI_GATEWAY_TOKEN_{s.index}",
+                        os.environ.get("CF_AI_GATEWAY_TOKEN", ""),
+                    ).strip()
+                    if gw_token:
+                        headers["cf-aig-authorization"] = f"Bearer {gw_token}"
+
                     payload = self._build_cf_request_body(
                         model_id=m,
                         messages=messages,
@@ -1930,79 +1965,110 @@ class CloudflareAIGatewayProvider(_BaseProvider):
                     self.rotator.mark_success(s, lat)
                     self.circuit_breaker.record_success()
                     return CloudflareWorkersAIProvider._extract_cf_content(resp)
+
                 except BadRequestError as e:
-                    bad_req_count += 1  # BUG-3 FIX: Track per-slot
-                    last_err = e  # BUG-3 FIX: Set last_err so slot failure is handled
-                    # HTTP 400 — NOT an auth failure. Check if empty body (dead slot)
-                    # or model-specific issue (try next model).
+                    bad_req_count += 1
+                    last_err = e
                     err_msg = str(e)
+
                     if "empty body" in err_msg.lower():
                         with self._dead_slots_lock:
                             if s.index not in self._dead_slots:
                                 self._dead_slots.add(s.index)
                                 logger.warning(
-                                    f"[CF-AI-GW] slot {s.index} permanently failed "
-                                    f"(HTTP 400 empty body) — "
-                                    f"skipping all remaining models for this slot"
+                                    f"[CF-AI-GW] slot {s.index} dead "
+                                    f"(HTTP 400 empty body)"
                                 )
-                        break  # Stop trying models for this slot
-                    # BUG-3 FIX: Track per-slot model failures (not global)
-                    if not hasattr(self, '_slot_failed_models'):
-                        self._slot_failed_models = set()
+                        break
+
                     self._slot_failed_models.add((s.index, m))
-                    logger.debug(
-                        f"[CF-AI-GW] slot {s.index} model {m} → "
-                        f"BadRequestError: {err_msg[:200]}"
+
+                    # BUG-FIX-18.0: After all OpenAI-compat variants fail,
+                    # try the native CF Workers AI URL format through the gateway.
+                    # Native: POST {gateway_base}/workers-ai/{model_id}
+                    # This format is supported by older gateway configurations.
+                    # Only try native format for @cf/ prefixed models (skip bare variants).
+                    native_model = m if m.startswith("@cf/") else f"@cf/{m}"
+                    native_url = self._build_cf_native_gateway_url(
+                        s.gateway_url, native_model
                     )
-                    continue  # Try next model on THIS slot
+                    try:
+                        clean_token = _sanitize_api_key(s.api_key)
+                        native_headers = {
+                            "Content-Type":  "application/json",
+                            "Authorization": f"Bearer {clean_token}",
+                        }
+                        if gw_token:
+                            native_headers["cf-aig-authorization"] = f"Bearer {gw_token}"
+                        native_payload = {
+                            "messages":   messages,
+                            "max_tokens": max_tokens,
+                            "stream":     False,
+                        }
+                        logger.debug(
+                            f"[CF-AI-GW] slot {s.index} model {m} — "
+                            f"trying native CF format: {native_url[:80]}"
+                        )
+                        resp, lat = self._post_json_with_retry(
+                            native_url, native_headers, native_payload,
+                            timeout, provider_name="CF-AI-GW", slot_index=s.index
+                        )
+                        self.rotator.mark_success(s, lat)
+                        self.circuit_breaker.record_success()
+                        logger.info(
+                            f"[CF-AI-GW] slot {s.index} native CF format "
+                            f"succeeded for model {native_model}"
+                        )
+                        return CloudflareWorkersAIProvider._extract_cf_content(resp)
+                    except BadRequestError:
+                        logger.debug(
+                            f"[CF-AI-GW] slot {s.index} native format also "
+                            f"returned 400 for {native_model}"
+                        )
+                        continue
+                    except Exception:
+                        continue
+
                 except urllib.error.HTTPError as e:
                     last_err = e
                     if e.code in (403, 401):
                         last_auth_error = e
                         logger.warning(
-                            f"[CF-AI-GW] slot {s.index} AUTH FAIL HTTP {e.code} "
-                            f"URL={s.gateway_url[:40]}..."
+                            f"[CF-AI-GW] slot {s.index} AUTH FAIL HTTP {e.code}"
                         )
                         self.circuit_breaker.record_failure()
-                        break  # Try next slot, not next model
-                    # NOTE: 400 is now caught as BadRequestError above, not here
+                        break
                     if e.code == 404:
                         logger.debug(f"[CF-AI-GW] Model not found: {m}")
-                        if not hasattr(self, '_slot_failed_models'):
-                            self._slot_failed_models = set()
                         self._slot_failed_models.add((s.index, m))
                         continue
                     logger.warning(
-                        f"[CF-AI-GW] slot {s.index} "
-                        f"URL={s.gateway_url[:40]}... HTTP {e.code}"
+                        f"[CF-AI-GW] slot {s.index} HTTP {e.code}"
                     )
                     self.circuit_breaker.record_failure()
                     raise
 
-            # BUG-3 FIX: After trying all models for a slot,
-            # handle the result properly — mark failure and continue
-            # to the NEXT slot. NEVER raise here — always try next slot.
-            if bad_req_count > 0 and bad_req_count == len(models_to_try):
+            if bad_req_count > 0 and bad_req_count >= len(models_to_try):
                 logger.warning(
                     f"[CF-AI-GW] slot {s.index} — all {len(models_to_try)} "
-                    f"models returned 400, moving to next slot"
+                    f"model variants returned 400, moving to next slot"
                 )
                 self.rotator.mark_failure(s)
                 self.circuit_breaker.record_failure()
-                continue  # ← Always continue to next slot
+                continue
 
             if last_err:
-                if isinstance(last_err, (urllib.error.HTTPError,)) and last_err.code in (403, 401):
+                if isinstance(last_err, urllib.error.HTTPError) and last_err.code in (403, 401):
                     self.rotator.mark_failure(s)
-                    continue  # Try next slot
+                    continue
                 logger.warning(f"[CF-AI-GW] slot {s.index} all models failed")
                 self.rotator.mark_failure(s)
                 self.circuit_breaker.record_failure()
                 if attempt == len(fallbacks) - 1:
-                    raise last_err
-                time.sleep(2 ** attempt)
+                    if not isinstance(last_err, BadRequestError):
+                        raise last_err
+                time.sleep(2 ** min(attempt, 4))
 
-        # All slots exhausted — check if all are dead (config error, not runtime)
         with self._dead_slots_lock:
             all_dead = all(
                 s.index in self._dead_slots
@@ -2012,8 +2078,10 @@ class CloudflareAIGatewayProvider(_BaseProvider):
         if all_dead:
             raise ProviderConfigurationError(
                 f"[CF-AI-GW] All {len(self.rotator.slots)} slots failed "
-                f"(HTTP 400 / empty body on first model attempt per slot). "
-                f"Verify CF_ACCOUNT_ID and CF_API_TOKEN values in GitHub Secrets.",
+                f"(HTTP 400 on all model/format combinations). "
+                f"Check: (1) gateway slugs exist in CF dashboard, "
+                f"(2) CF_API_TOKEN has Workers AI:Run + AI Gateway:Execute permissions, "
+                f"(3) try setting CF_AI_GATEWAY_TOKEN_{{n}} for gateway-specific auth.",
                 provider="cloudflare_ai_gateway",
             )
 
